@@ -1,3 +1,4 @@
+import os
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
@@ -119,14 +120,16 @@ class Codex(nn.Module):
 
 class DataloaderLite:
 
-    def __init__(self, B, T):
+    def __init__(self, B, T, config):
         self.B = B
         self.T = T
 
         self.current_idx = 0
 
+        file_path = config.path
+
         with open(
-            "/Users/tinuademargaret/Documents/explorer/neslacodeX/src/data/input.txt",
+            os.path.expanduser(file_path),
             "r",
         ) as f:
             text = f.read()
@@ -151,14 +154,16 @@ def train(config, device):
     model = Codex(config.model)
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-    dataloader = DataloaderLite(2, 1024)
+    dataloader = DataloaderLite(16, 1024, config.data)
+    B, T = dataloader.B, dataloader.T
 
     for epoch in range(50):
         t0 = time.time()
         optimizer.zero_grad()
         x, y = dataloader.next_batch()
         x, y = x.to(device), y.to(device)
-        logits, loss = model(x, y)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
         loss.backward()
         optimizer.step()
         if device == "cuda":
@@ -167,7 +172,8 @@ def train(config, device):
             torch.mps.synchronize()
         t1 = time.time()
         dt = (t1 - t0) * 1000
-        print(f"Epoch {epoch} loss: {loss.item()}, time: {dt}ms")
+        toks_sec = (B * T)/  (t1 - t0)
+        print(f"Epoch {epoch} loss: {loss.item()}, time: {dt}ms, toks/sec: {toks_sec}")
 
 
 @hydra.main(config_path="config", config_name="config.yaml")
@@ -182,6 +188,8 @@ def main(config):
         device = "mps"
         torch.mps.manual_seed(1337)
     print(f"Using device: {device}")
+
+    torch.set_float32_matmul_precision("high")
 
     train(config, device)
 
