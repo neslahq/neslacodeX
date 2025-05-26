@@ -27,7 +27,7 @@ class Attention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=None)
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         attn = attn.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(attn)
 
@@ -152,9 +152,11 @@ class DataloaderLite:
 
 def train(config, device):
     model = Codex(config.model)
-    model = model.to(device)
+    model.to(device)
+    model = torch.compile(model)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-    dataloader = DataloaderLite(16, 1024, config.data)
+    dataloader = DataloaderLite(14, 1024, config.data)
     B, T = dataloader.B, dataloader.T
 
     for epoch in range(50):
