@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch
 import hydra
 import tiktoken
+import time
 
 
 class Attention(nn.Module):
@@ -150,16 +151,23 @@ def train(config, device):
     model = Codex(config.model)
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-    dataloader = DataloaderLite(4, 32)
+    dataloader = DataloaderLite(2, 1024)
 
     for epoch in range(50):
+        t0 = time.time()
         optimizer.zero_grad()
         x, y = dataloader.next_batch()
         x, y = x.to(device), y.to(device)
         logits, loss = model(x, y)
         loss.backward()
         optimizer.step()
-        print(f"Epoch {epoch} loss: {loss.item()}")
+        if device == "cuda":
+            torch.cuda.synchronize()
+        if device == "mps":
+            torch.mps.synchronize()
+        t1 = time.time()
+        dt = (t1 - t0) * 1000
+        print(f"Epoch {epoch} loss: {loss.item()}, time: {dt}ms")
 
 
 @hydra.main(config_path="config", config_name="config.yaml")
