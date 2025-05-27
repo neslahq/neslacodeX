@@ -219,8 +219,8 @@ def train(config, device):
                 x, y = x.to(device), y.to(device)
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
                     logits, loss = model(x, y)
-                    loss_accum += loss.detach()
                     loss = loss / config.train.gradient_accumulation_steps
+                    loss_accum += loss.detach()
                 loss.backward()
             norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             lr = get_lr(step, config.model.optimizer)
@@ -233,9 +233,9 @@ def train(config, device):
                 torch.mps.synchronize()
             t1 = time.time()
             dt = (t1 - t0) * 1000
-            toks_sec = (B * T) / (t1 - t0)
+            toks_sec = (B * T * config.train.gradient_accumulation_steps) / (t1 - t0)
             print(
-                f"Epoch {step} loss: {loss_accum.item()}, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
+                f"Epoch {epoch}: step: {step}, lr: {lr}, loss: {loss_accum.item()}, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
             )
 
 
