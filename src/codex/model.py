@@ -207,6 +207,13 @@ def train(config, device):
     optimizer = model.configure_optimizer(device)
     dataloader = DataloaderLite(14, 1024, config.data)
     B, T = dataloader.B, dataloader.T
+    total_batch_size = config.train.total_batch_size
+
+    assert (
+        total_batch_size % (B * T) == 0
+    ), "total_batch_size must be divisible by the batch size x sequence length"
+
+    gradient_accumulation_steps = total_batch_size // (B * T)
 
     for epoch in range(config.train.epochs):
 
@@ -214,7 +221,7 @@ def train(config, device):
             t0 = time.time()
             optimizer.zero_grad()
             loss_accum = 0.0
-            for micro_step in range(config.train.gradient_accumulation_steps):
+            for micro_step in range(gradient_accumulation_steps):
                 x, y = dataloader.next_batch()
                 x, y = x.to(device), y.to(device)
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
