@@ -165,6 +165,7 @@ class DataloaderLite:
 
         self.enc = tiktoken.get_encoding("gpt2")
         self.tokens = torch.tensor(self.enc.encode(text))
+        print(f"Total number of tokens {self.tokens.shape[0]}")
 
     def next_batch(self):
         buff = self.tokens[self.current_idx : self.current_idx + self.B * self.T + 1]
@@ -182,21 +183,20 @@ class DataloaderLite:
 def get_lr(step, config):
 
     # linear warmup
-    if step < config.warmup_steps:
-        return config.max_lr * (step + 1) / config.warmup_steps
+    if step < config.model.optimizer.warmup_steps:
+        return config.model.optimizer.max_lr * (step + 1) / config.model.optimizer.warmup_steps
 
-    if step > config.max_steps:
-        return config.min_lr
+    if step > config.train.max_steps:
+        return config.model.optimizer.min_lr
 
     # cosine decay
     # normalize decay ratio to 0-1
-    decay_ratio = (step - config.warmup_steps) / (
-        config.max_steps - config.warmup_steps
+    decay_ratio = (step - config.model.optimizer.warmup_steps) / (
+        config.train.max_steps - config.model.optimizer.warmup_steps
     )
     assert 0 <= decay_ratio <= 1
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return config.min_lr + coeff * (config.max_lr - config.min_lr)
-
+    return config.model.optimizer.min_lr + coeff * (config.model.optimizer.max_lr - config.model.optimizer.min_lr)
 
 def train(config, device):
     model = Codex(config.model)
@@ -205,7 +205,7 @@ def train(config, device):
         model = torch.compile(model)
 
     optimizer = model.configure_optimizer(device)
-    dataloader = DataloaderLite(14, 1024, config.data)
+    dataloader = DataloaderLite(8, 1024, config.data)
     B, T = dataloader.B, dataloader.T
     total_batch_size = config.train.total_batch_size
 
@@ -226,11 +226,11 @@ def train(config, device):
                 x, y = x.to(device), y.to(device)
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
                     logits, loss = model(x, y)
-                    loss = loss / config.train.gradient_accumulation_steps
+                    loss = loss / gradient_accumulation_steps
                     loss_accum += loss.detach()
                 loss.backward()
             norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            lr = get_lr(step, config.model.optimizer)
+            lr = get_lr(step, config)
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
             optimizer.step()
@@ -240,7 +240,7 @@ def train(config, device):
                 torch.mps.synchronize()
             t1 = time.time()
             dt = (t1 - t0) * 1000
-            toks_sec = (B * T * config.train.gradient_accumulation_steps) / (t1 - t0)
+            toks_sec = (B * T * gradient_accumulation_steps) / (t1 - t0)
             print(
                 f"Epoch {epoch}: step: {step}, lr: {lr}, loss: {loss_accum.item()}, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
             )
