@@ -1,10 +1,12 @@
 import os
+import inspect
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import hydra
 import tiktoken
 import time
+import math
 
 
 class Attention(nn.Module):
@@ -95,6 +97,33 @@ class Codex(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+    def configure_optimizer(self, device_type):
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        non_decay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+
+        optim_groups = [
+            {
+                "params": decay_params,
+                "weight_decay": self.config.optimizer.weight_decay,
+            },
+            {"params": non_decay_params, "weight_decay": 0.0},
+        ]
+
+        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == "cuda"
+
+        optimizer = torch.optim.AdamW(
+            optim_groups,
+            lr=self.config.optimizer.learning_rate,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            fused=use_fused,
+        )
+
+        return optimizer
+
     def forward(self, idx, targets=None):
         B, T = idx.size()
         assert (
@@ -150,16 +179,36 @@ class DataloaderLite:
         return x, y
 
 
+def get_lr(step, config):
+
+    # linear warmup
+    if step < config.warmup_steps:
+        return config.max_lr * (step + 1) / config.warmup_steps
+
+    if step > config.max_steps:
+        return config.min_lr
+
+    # cosine decay
+    # normalize decay ratio to 0-1
+    decay_ratio = (step - config.warmup_steps) / (
+        config.max_steps - config.warmup_steps
+    )
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return config.min_lr + coeff * (config.max_lr - config.min_lr)
+
+
 def train(config, device):
     model = Codex(config.model)
     model.to(device)
-    model = torch.compile(model)
+    if device == "cuda":
+        model = torch.compile(model)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    optimizer = model.configure_optimizer(device)
     dataloader = DataloaderLite(14, 1024, config.data)
     B, T = dataloader.B, dataloader.T
 
-    for epoch in range(50):
+    for step in range(config.train.max_steps):
         t0 = time.time()
         optimizer.zero_grad()
         x, y = dataloader.next_batch()
@@ -167,6 +216,10 @@ def train(config, device):
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             logits, loss = model(x, y)
         loss.backward()
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        lr = get_lr(step, config.model.optimizer)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
         optimizer.step()
         if device == "cuda":
             torch.cuda.synchronize()
@@ -174,8 +227,10 @@ def train(config, device):
             torch.mps.synchronize()
         t1 = time.time()
         dt = (t1 - t0) * 1000
-        toks_sec = (B * T)/  (t1 - t0)
-        print(f"Epoch {epoch} loss: {loss.item()}, time: {dt}ms, toks/sec: {toks_sec}")
+        toks_sec = (B * T) / (t1 - t0)
+        print(
+            f"Epoch {step} loss: {loss.item()}, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
+        )
 
 
 @hydra.main(config_path="config", config_name="config.yaml")
