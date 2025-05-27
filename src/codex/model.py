@@ -7,6 +7,8 @@ import hydra
 import tiktoken
 import time
 import math
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 class Attention(nn.Module):
@@ -149,11 +151,12 @@ class Codex(nn.Module):
 
 class DataloaderLite:
 
-    def __init__(self, B, T, config):
+    def __init__(self, B, T, config, rank, world_size):
         self.B = B
         self.T = T
-
-        self.current_idx = 0
+        self.rank = rank
+        self.world_size = world_size
+        self.current_idx = self.rank * T * B
 
         file_path = config.path
 
@@ -172,10 +175,12 @@ class DataloaderLite:
         x = buff[:-1].view(self.B, self.T)
         y = buff[1:].view(self.B, self.T)
 
-        self.current_idx += self.B * self.T
+        self.current_idx += self.B * self.T * self.world_size
 
-        if self.current_idx + (self.B * self.T + 1) >= len(self.tokens):
-            self.current_idx = 0
+        if self.current_idx + (self.B * self.T * self.world_size + 1) >= len(
+            self.tokens
+        ):
+            self.current_idx = self.rank * self.T * self.B
 
         return x, y
 
@@ -184,7 +189,11 @@ def get_lr(step, config):
 
     # linear warmup
     if step < config.model.optimizer.warmup_steps:
-        return config.model.optimizer.max_lr * (step + 1) / config.model.optimizer.warmup_steps
+        return (
+            config.model.optimizer.max_lr
+            * (step + 1)
+            / config.model.optimizer.warmup_steps
+        )
 
     if step > config.train.max_steps:
         return config.model.optimizer.min_lr
@@ -196,24 +205,35 @@ def get_lr(step, config):
     )
     assert 0 <= decay_ratio <= 1
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return config.model.optimizer.min_lr + coeff * (config.model.optimizer.max_lr - config.model.optimizer.min_lr)
+    return config.model.optimizer.min_lr + coeff * (
+        config.model.optimizer.max_lr - config.model.optimizer.min_lr
+    )
 
-def train(config, device):
-    model = Codex(config.model)
-    model.to(device)
-    if device == "cuda":
-        model = torch.compile(model)
 
-    optimizer = model.configure_optimizer(device)
-    dataloader = DataloaderLite(8, 1024, config.data)
+def train(config, device, world_size, rank, local_rank, ddp):
+
+    dataloader = DataloaderLite(8, 1024, config.data, rank, world_size)
     B, T = dataloader.B, dataloader.T
     total_batch_size = config.train.total_batch_size
 
     assert (
-        total_batch_size % (B * T) == 0
+        total_batch_size % (B * T * world_size) == 0
     ), "total_batch_size must be divisible by the batch size x sequence length"
 
-    gradient_accumulation_steps = total_batch_size // (B * T)
+    gradient_accumulation_steps = total_batch_size // (B * T * world_size)
+
+    model = Codex(config.model)
+    model.to(device)
+
+    if device == "cuda":
+        model = torch.compile(model)
+
+    if ddp:
+        model = DDP(model, device_ids=[local_rank])
+
+    raw_model = model.module if ddp else model
+
+    optimizer = raw_model.configure_optimizer(device)
 
     for epoch in range(config.train.epochs):
 
@@ -228,7 +248,14 @@ def train(config, device):
                     logits, loss = model(x, y)
                     loss = loss / gradient_accumulation_steps
                     loss_accum += loss.detach()
+                # we don't want ddp to sync gradients every micro_step
+                if ddp:
+                    model.require_backward_grad_sync = (
+                        micro_step == gradient_accumulation_steps - 1
+                    )
                 loss.backward()
+            if ddp:
+                dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
             norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             lr = get_lr(step, config)
             for param_group in optimizer.param_groups:
@@ -240,30 +267,51 @@ def train(config, device):
                 torch.mps.synchronize()
             t1 = time.time()
             dt = (t1 - t0) * 1000
-            toks_sec = (B * T * gradient_accumulation_steps) / (t1 - t0)
-            print(
-                f"Epoch {epoch}: step: {step}, lr: {lr}, loss: {loss_accum.item()}, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
-            )
+            toks_sec = (B * T * gradient_accumulation_steps * world_size) / (t1 - t0)
+            if rank == 0:
+                print(
+                    f"Epoch {epoch}: step: {step}, lr: {lr}, loss: {loss_accum.item()}, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
+                )
+
+    if ddp:
+        dist.destroy_process_group()
 
 
 @hydra.main(config_path="config", config_name="config.yaml")
 def main(config):
-    device = "cpu"
-    torch.manual_seed(1337)
 
-    if torch.cuda.is_available():
-        device = "cuda"
-        torch.cuda.manual_seed(1337)
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = "mps"
-        torch.mps.manual_seed(1337)
-    print(f"Using device: {device}")
+    ddp = int(os.environ.get("RANK", -1)) != -1
+    if ddp:
+        assert torch.cuda.is_available(), "For ddp training, cuda is required"
+        dist.init_process_group(backend="nccl")
+        rank = int(os.environ.get("RANK"))
+        local_rank = int(os.environ.get("LOCAL_RANK"))
+        world_size = int(os.environ.get("WORLD_SIZE"))
+        device = f"cuda:{local_rank}"
+        torch.cuda.set_device(device)
+        master_process = rank == 0
+    else:
+        rank = 0
+        local_rank = 0
+        world_size = 1
+        master_process = True
+        device = "cpu"
+        torch.manual_seed(1337)
+
+        if torch.cuda.is_available():
+            device = "cuda"
+            torch.cuda.manual_seed(1337)
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = "mps"
+            torch.mps.manual_seed(1337)
+        print(f"Using device: {device}")
 
     torch.set_float32_matmul_precision("high")
+    # TODO: Add params to config
+    train(config, device, world_size, rank, local_rank, ddp)
 
-    train(config, device)
-
-    print("Model created")
+    if master_process:
+        print(f"World size: {world_size}")
 
 
 if __name__ == "__main__":
