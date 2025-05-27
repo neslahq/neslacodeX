@@ -208,29 +208,35 @@ def train(config, device):
     dataloader = DataloaderLite(14, 1024, config.data)
     B, T = dataloader.B, dataloader.T
 
-    for step in range(config.train.max_steps):
-        t0 = time.time()
-        optimizer.zero_grad()
-        x, y = dataloader.next_batch()
-        x, y = x.to(device), y.to(device)
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            logits, loss = model(x, y)
-        loss.backward()
-        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        lr = get_lr(step, config.model.optimizer)
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = lr
-        optimizer.step()
-        if device == "cuda":
-            torch.cuda.synchronize()
-        if device == "mps":
-            torch.mps.synchronize()
-        t1 = time.time()
-        dt = (t1 - t0) * 1000
-        toks_sec = (B * T) / (t1 - t0)
-        print(
-            f"Epoch {step} loss: {loss.item()}, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
-        )
+    for epoch in range(config.train.epochs):
+
+        for step in range(config.train.max_steps):
+            t0 = time.time()
+            optimizer.zero_grad()
+            loss_accum = 0.0
+            for micro_step in range(config.train.gradient_accumulation_steps):
+                x, y = dataloader.next_batch()
+                x, y = x.to(device), y.to(device)
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(x, y)
+                    loss_accum += loss.detach()
+                    loss = loss / config.train.gradient_accumulation_steps
+                loss.backward()
+            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            lr = get_lr(step, config.model.optimizer)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
+            optimizer.step()
+            if device == "cuda":
+                torch.cuda.synchronize()
+            if device == "mps":
+                torch.mps.synchronize()
+            t1 = time.time()
+            dt = (t1 - t0) * 1000
+            toks_sec = (B * T) / (t1 - t0)
+            print(
+                f"Epoch {step} loss: {loss_accum.item()}, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
+            )
 
 
 @hydra.main(config_path="config", config_name="config.yaml")

@@ -18,4 +18,5 @@ data:
 train:
   epochs: 1
   max_steps: 50
+  gradient_accumulation_steps: 2
   
