@@ -27,13 +27,20 @@ class Attention(nn.Module):
 
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        self.rotary_pos_emb = RotaryPositionalEmbeddings(config.n_embd)
+        self.rotary_pos_emb = RotaryPositionalEmbeddings(config.n_embd // config.n_head)
 
     def forward(self, x):
         B, T, C = x.size()
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+
+        q = q.view(B, T, self.n_head, C // self.n_head)
+        k = k.view(B, T, self.n_head, C // self.n_head)
+
+        q = self.rotary_pos_emb(q)
+        k = self.rotary_pos_emb(k)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
         q = self.rotary_pos_emb(q)
@@ -449,7 +456,7 @@ def get_lr(step, config):
 
 def train(config, device, world_size, rank, local_rank, ddp):
 
-    dataloader = DataloaderLite(4, 1024, config.data, rank, world_size)
+    dataloader = DataloaderLite(8, 1024, config.data, rank, world_size)
     B, T = dataloader.B, dataloader.T
     total_batch_size = config.train.total_batch_size
 
