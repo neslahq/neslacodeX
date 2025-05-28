@@ -311,8 +311,8 @@ class Codex(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
         elif isinstance(module, MLPExperts):
-            torch.nn.init.normal_(module.c_fc.weight, mean=0.0, std=0.02)
-            torch.nn.init.normal_(module.c_proj.weight, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.c_fc, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.c_proj, mean=0.0, std=0.02)
             if module.bias:
                 torch.nn.init.zeros_(module.bias_fc)
                 torch.nn.init.zeros_(module.bias_proj)
