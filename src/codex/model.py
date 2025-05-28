@@ -10,7 +10,9 @@ import math
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from utils import MOEManager as MANAGER
+from utils import MOEManager 
+
+MANAGER = MOEManager()
 
 
 class Attention(nn.Module):
@@ -118,7 +120,7 @@ class Router(nn.Module):
             router_logits += noise
 
         if self.config.use_router_z_loss:
-            z_loss = self.compute_z_loss(router_logits)
+            z_loss = self.compute_router_z_loss(router_logits)
             MANAGER.add_router_z_loss(z_loss)
 
         topk_logits, topk_indices = router_logits.topk(
@@ -139,19 +141,19 @@ class Router(nn.Module):
         exp_cap += exp_cap % 2
         exp_cap = int(exp_cap)
 
-        exp_mask = F.one_hot(topk_indices, num_classes=self.n_exp)  # [B, C, K, n_exp]
+        exp_mask = F.one_hot(topk_indices, num_classes=self.config.n_exp)  # [B, C, K, n_exp]
         exp_mask = exp_mask.view(
-            num_tokens, self.top_k, self.n_exp
+            num_tokens, self.config.top_k, self.config.n_exp
         )  # [B * C, K, n_exp]
         exp_mask = exp_mask.permute(1, 0, 2)  # [K, B * C, n_exp]
 
         exp_rank = exp_mask.reshape(
-            self.top_k * num_tokens, self.n_exp
+            self.config.top_k * num_tokens, self.config.n_exp
         )  # [K * B * C, n_exp]
         exp_rank = (
             torch.cumsum(exp_rank, dim=0) - 1
         )  # cumsum of expert selections [K * B * C, n_exp]
-        exp_rank = exp_rank.reshape(self.top_k, num_tokens, self.n_exp)
+        exp_rank = exp_rank.reshape(self.config.top_k, num_tokens, self.config.n_exp)
 
         exp_mask *= torch.lt(exp_rank, exp_cap)  # [K, B * C, n_exp]
         used_cap = torch.sum(exp_mask, dim=(0, 1))
@@ -160,7 +162,7 @@ class Router(nn.Module):
         exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [K, B * C]
 
         # mask probabilities to only include selected experts
-        router_probs = router_probs.view(num_tokens, self.n_exp)[
+        router_probs = router_probs.view(num_tokens, self.config.n_exp)[
             None, :
         ]  # [1, B * C, n_exp]
         exp_weights = exp_mask * router_probs  # [K, B * C, n_exp]
@@ -178,8 +180,8 @@ class Router(nn.Module):
 
         # reshape tokens into batches for each expert, return both weights and batches
         # [n_exp, exp_capacity, B * C] * [B * C, d] -> [n_exp, exp_capacity, n_embd]
-        x = x.view(num_tokens, self.d)
-        expert_batches = exp_mask.permute(1, 2, 0).type_as(x) @ x
+        x = x.view(num_tokens, self.config.n_embd)
+       
         return used_cap, cb_weight, sec_mask
 
     def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
@@ -442,7 +444,7 @@ def get_lr(step, config):
 
 def train(config, device, world_size, rank, local_rank, ddp):
 
-    dataloader = DataloaderLite(8, 1024, config.data, rank, world_size)
+    dataloader = DataloaderLite(4, 1024, config.data, rank, world_size)
     B, T = dataloader.B, dataloader.T
     total_batch_size = config.train.total_batch_size
 

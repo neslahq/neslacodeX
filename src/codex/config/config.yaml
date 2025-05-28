@@ -2,9 +2,9 @@ model:
   n_embd: 768
   n_head: 12
   n_layers: 12
-  n_exp: 2 
+  n_exp: 5 
   p: 2
-  top_k: 2
+  top_k: 4
   capacity_factor: 1.25
   use_router_noise: true
   bias: true
