@@ -10,6 +10,8 @@ import math
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from utils import MOEManager as MANAGER
+
 
 class Attention(nn.Module):
     def __init__(self, config):
@@ -97,9 +99,11 @@ class Router(nn.Module):
             config.top_k >= 1 and config.top_k <= config.n_exp
         ), f"top_k must be less than or equal to n_exp"
 
-        self.router = nn.Linear(config.n_embd, config.n_exp)
+        self.router = nn.Linear(config.n_embd, config.n_exp, bias=False)
         self.router_noise = (
-            nn.Linear(config.n_embd, config.n_exp) if config.use_router_noise else None
+            nn.Linear(config.n_embd, config.n_exp, bias=False)
+            if config.use_router_noise
+            else None
         )
 
     def forward(self, x):
@@ -113,12 +117,20 @@ class Router(nn.Module):
             noise = noise_weights * torch.rand_like(noise_weights)
             router_logits += noise
 
+        if self.config.use_router_z_loss:
+            z_loss = self.compute_z_loss(router_logits)
+            MANAGER.add_router_z_loss(z_loss)
+
         topk_logits, topk_indices = router_logits.topk(
             self.config.top_k, dim=-1
         )  # B, T, top_k
         router_probs = torch.full_like(router_logits, float("-inf"))  # [B, C, n_exp]
         router_probs.scatter_(-1, topk_indices, topk_logits)
         router_probs = F.softmax(router_probs, dim=-1)
+
+        if self.config.use_aux_loss:
+            aux_loss = self.compute_aux_loss(router_probs, topk_indices)
+            MANAGER.add_aux_loss(aux_loss)
 
         # compute expert capacity
         exp_cap = (
@@ -142,6 +154,7 @@ class Router(nn.Module):
         exp_rank = exp_rank.reshape(self.top_k, num_tokens, self.n_exp)
 
         exp_mask *= torch.lt(exp_rank, exp_cap)  # [K, B * C, n_exp]
+        used_cap = torch.sum(exp_mask, dim=(0, 1))
 
         # matrix storing token position in batch of corresponding expert
         exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [K, B * C]
@@ -158,16 +171,57 @@ class Router(nn.Module):
         )  # [K, B * C, exp_capacity]
 
         # weight of selected expert for each token at position the capacity of that expert
-        exp_weights = torch.sum(
+        cb_weight = torch.sum(
             exp_weights.unsqueeze(3) * exp_rank_sc.unsqueeze(2), dim=0
         )  # [B * C, n_exp, exp_capacity]
-        exp_mask = exp_weights.bool()  # binary mask of selected experts for each token
+        sec_mask = cb_weight.bool()  # binary mask of selected experts for each token
 
         # reshape tokens into batches for each expert, return both weights and batches
         # [n_exp, exp_capacity, B * C] * [B * C, d] -> [n_exp, exp_capacity, n_embd]
         x = x.view(num_tokens, self.d)
         expert_batches = exp_mask.permute(1, 2, 0).type_as(x) @ x
-        return exp_weights, exp_mask, expert_batches
+        return used_cap, cb_weight, sec_mask
+
+    def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
+        """
+        Computes Switch Transformer auxiliary loss (https://arxiv.org/abs/2101.03961)
+        See equations (4)-(6) on page 7
+        """
+
+        # equation (5): compute ratio of tokens allocated to each expert
+        # total number of tokens is defined as total tokens in batch * k
+        # (k = 1) for the Switch Transformer
+        with torch.no_grad():
+            one_hot_indices = F.one_hot(
+                indices, num_classes=self.config.n_exp
+            )  # [B, T, k, n_exp]
+            one_hot_indices = torch.sum(
+                one_hot_indices.float(), dim=2
+            )  # [B, T, n_exp] (sum over k dimension)
+            tokens_per_expert = torch.mean(one_hot_indices.float(), dim=(0, 1))
+
+        # equation (6): compute ratio of router probability allocated to each expert
+        prob_per_expert = torch.mean(expert_probs.float(), dim=(0, 1))
+
+        # equation (4): take a scaled dot product between prob/token allocation vectors
+        # multiply the result by the number of experts
+        return self.config.n_exp * torch.sum(prob_per_expert * tokens_per_expert)
+
+    def compute_router_z_loss(self, logits: torch.Tensor):
+        """
+        Computes ST-MoE router z loss (https://arxiv.org/abs/2202.08906)
+        See equation (5) on page 7
+        """
+
+        # exponentiate logits, sum logits of each expert, take log, and square
+        # code below is the same as:
+        # > z_loss = torch.exp(logits)
+        # > z_loss = torch.sum(z_loss, dim=-1)
+        # > z_loss = torch.log(z_loss) ** 2.0
+        z_loss = torch.logsumexp(logits, dim=-1) ** 2.0  # [B, T, n_exp]
+
+        # sum over all tokens and divide by total number of tokens
+        return torch.mean(z_loss)
 
 
 class MOE(nn.Module):
@@ -180,16 +234,20 @@ class MOE(nn.Module):
         self.experts = MLPExperts(config)
 
     def forward(self, x):
-        B, C, _ = x.size()
-        num_tokens = B * C
+        B, T, n_embd = x.size()
+        num_tokens = B * T
 
-        exp_weight, exp_mask, expert_batches = self.router(x)
-        expert_out = self.experts(expert_batches)
+        used_capacity, exp_weight, exp_mask = self.router(x)
+
+        x = x.view(num_tokens, n_embd)
+        exp_batches = exp_mask.permute(1, 2, 0).type_as(x) @ x
+
+        exp_out = self.experts(exp_batches)
 
         exp_weight = exp_weight.view(num_tokens, -1)
-        expert_out = expert_out.view(-1, self.config.n_embd)
-        output = exp_weight @ expert_out
-        output = output.view(B, C, self.config.n_embd)
+        exp_out = exp_out.view(-1, self.config.n_embd)
+        output = exp_weight @ exp_out
+        output = output.view(B, T, self.config.n_embd)
         return output
 
 
@@ -252,6 +310,13 @@ class Codex(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+        elif isinstance(module, MLPExperts):
+            torch.nn.init.normal_(module.c_fc.weight, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.c_proj.weight, mean=0.0, std=0.02)
+            if module.bias:
+                torch.nn.init.zeros_(module.bias_fc)
+                torch.nn.init.zeros_(module.bias_proj)
+
     def configure_optimizer(self, device_type):
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
 
@@ -296,9 +361,20 @@ class Codex(nn.Module):
         x = self.transformer.ln_f(x)
 
         logits = self.lm_head(x)
-
+        loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+
+            if self.config.use_moe and self.config.use_aux_loss:
+                loss += self.config.aux_loss_weight * MANAGER.aggregate_aux_loss()
+                MANAGER.reset_aux_loss()
+
+            if self.config.use_moe and self.config.use_router_z_loss:
+                loss += (
+                    self.config.router_z_loss_weight * MANAGER.aggregate_router_z_loss()
+                )
+                MANAGER.reset_router_z_loss()
+
         return logits, loss
 
 
