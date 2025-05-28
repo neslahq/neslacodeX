@@ -49,14 +49,161 @@ class MLP(nn.Module):
         return self.c_proj(self.gelu(self.c_fc(x)))
 
 
-class Block(nn.Module):
+class MLPExperts(nn.Module):
+
     def __init__(self, config):
+        super().__init__()
+
+        self.config = config
+        self.c_fc = nn.Parameter(
+            torch.empty(config.n_exp, config.n_embd, 3 * config.n_embd)
+        )
+        # does this get added as part of the model in the accelerator even when it is not in use?
+        self.bias_fc = (
+            nn.Parameter(torch.empty(config.n_exp, 1, 3 * config.n_embd))
+            if self.config.bias
+            else None
+        )
+        self.c_proj = nn.Parameter(
+            torch.empty(config.n_exp, 3 * config.n_embd, config.n_embd)
+        )
+        self.bias_proj = (
+            nn.Parameter(torch.empty(config.n_exp, 1, config.n_embd))
+            if self.config.bias
+            else None
+        )
+        self.gelu = nn.GELU()
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = torch.bmm(x, self.c_fc)
+        if self.config.bias:
+            x = x + self.bias_fc
+        x = self.gelu(x)
+        x = torch.bmm(x, self.c_proj)
+        if self.config.bias:
+            x = x + self.bias_proj
+        x = self.dropout(x)
+        return x
+
+
+class Router(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+
+        self.config = config
+        assert (
+            config.top_k >= 1 and config.top_k <= config.n_exp
+        ), f"top_k must be less than or equal to n_exp"
+
+        self.router = nn.Linear(config.n_embd, config.n_exp)
+        self.router_noise = (
+            nn.Linear(config.n_embd, config.n_exp) if config.use_router_noise else None
+        )
+
+    def forward(self, x):
+        B, T, _ = x.size()
+        num_tokens = B * T
+
+        router_logits = self.router(x)
+
+        if self.config.use_router_noise:
+            noise_weights = F.softplus(self.router_noise(x))
+            noise = noise_weights * torch.rand_like(noise_weights)
+            router_logits += noise
+
+        topk_logits, topk_indices = router_logits.topk(
+            self.config.top_k, dim=-1
+        )  # B, T, top_k
+        router_probs = torch.full_like(router_logits, float("-inf"))  # [B, C, n_exp]
+        router_probs.scatter_(-1, topk_indices, topk_logits)
+        router_probs = F.softmax(router_probs, dim=-1)
+
+        # compute expert capacity
+        exp_cap = (
+            (self.config.top_k * B * T) / self.config.n_exp
+        ) * self.config.capacity_factor
+        exp_cap += exp_cap % 2
+        exp_cap = int(exp_cap)
+
+        exp_mask = F.one_hot(topk_indices, num_classes=self.n_exp)  # [B, C, K, n_exp]
+        exp_mask = exp_mask.view(
+            num_tokens, self.top_k, self.n_exp
+        )  # [B * C, K, n_exp]
+        exp_mask = exp_mask.permute(1, 0, 2)  # [K, B * C, n_exp]
+
+        exp_rank = exp_mask.reshape(
+            self.top_k * num_tokens, self.n_exp
+        )  # [K * B * C, n_exp]
+        exp_rank = (
+            torch.cumsum(exp_rank, dim=0) - 1
+        )  # cumsum of expert selections [K * B * C, n_exp]
+        exp_rank = exp_rank.reshape(self.top_k, num_tokens, self.n_exp)
+
+        exp_mask *= torch.lt(exp_rank, exp_cap)  # [K, B * C, n_exp]
+
+        # matrix storing token position in batch of corresponding expert
+        exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [K, B * C]
+
+        # mask probabilities to only include selected experts
+        router_probs = router_probs.view(num_tokens, self.n_exp)[
+            None, :
+        ]  # [1, B * C, n_exp]
+        exp_weights = exp_mask * router_probs  # [K, B * C, n_exp]
+
+        # position of each token within the capacity of the selected expert
+        exp_rank_sc = F.one_hot(
+            exp_rank, num_classes=exp_cap
+        )  # [K, B * C, exp_capacity]
+
+        # weight of selected expert for each token at position the capacity of that expert
+        exp_weights = torch.sum(
+            exp_weights.unsqueeze(3) * exp_rank_sc.unsqueeze(2), dim=0
+        )  # [B * C, n_exp, exp_capacity]
+        exp_mask = exp_weights.bool()  # binary mask of selected experts for each token
+
+        # reshape tokens into batches for each expert, return both weights and batches
+        # [n_exp, exp_capacity, B * C] * [B * C, d] -> [n_exp, exp_capacity, n_embd]
+        x = x.view(num_tokens, self.d)
+        expert_batches = exp_mask.permute(1, 2, 0).type_as(x) @ x
+        return exp_weights, exp_mask, expert_batches
+
+
+class MOE(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+
+        self.config = config
+        self.router = Router(config)
+        self.experts = MLPExperts(config)
+
+    def forward(self, x):
+        B, C, _ = x.size()
+        num_tokens = B * C
+
+        exp_weight, exp_mask, expert_batches = self.router(x)
+        expert_out = self.experts(expert_batches)
+
+        exp_weight = exp_weight.view(num_tokens, -1)
+        expert_out = expert_out.view(-1, self.config.n_embd)
+        output = exp_weight @ expert_out
+        output = output.view(B, C, self.config.n_embd)
+        return output
+
+
+class Block(nn.Module):
+    def __init__(self, config, use_moe=False):
         super().__init__()
 
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = Attention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MLP(config)
+        if use_moe:
+            self.mlp = MOE(config)
+        else:
+            self.mlp = MLP(config)
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
@@ -75,7 +222,13 @@ class Codex(nn.Module):
             dict(
                 wte=nn.Embedding(config.vocab_size, config.n_embd),
                 wpe=nn.Embedding(config.block_size, config.n_embd),
-                h=nn.ModuleList([Block(config) for _ in range(config.n_layers)]),
+                # use moe for every pth layer if use_moe is true
+                h=nn.ModuleList(
+                    [
+                        Block(config, use_moe=((i % config.p) == 0 and config.use_moe))
+                        for i in range(config.n_layers)
+                    ]
+                ),
                 ln_f=nn.LayerNorm(config.n_embd),
             )
         )
