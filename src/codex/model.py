@@ -313,8 +313,9 @@ class Codex(nn.Module):
         elif isinstance(module, MLPExperts):
             torch.nn.init.normal_(module.c_fc, mean=0.0, std=0.02)
             torch.nn.init.normal_(module.c_proj, mean=0.0, std=0.02)
-            if module.bias:
+            if module.bias_fc is not None:
                 torch.nn.init.zeros_(module.bias_fc)
+            if module.bias_proj is not None:
                 torch.nn.init.zeros_(module.bias_proj)
 
     def configure_optimizer(self, device_type):
