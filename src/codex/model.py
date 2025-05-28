@@ -9,8 +9,8 @@ import time
 import math
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-
-from utils import MOEManager 
+from torchtune.modules import RotaryPositionalEmbeddings
+from utils import MOEManager
 
 MANAGER = MOEManager()
 
@@ -27,13 +27,24 @@ class Attention(nn.Module):
 
         self.n_head = config.n_head
         self.n_embd = config.n_embd
+        self.rotary_pos_emb = RotaryPositionalEmbeddings(config.n_embd // config.n_head)
 
     def forward(self, x):
         B, T, C = x.size()
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+
+        q = q.view(B, T, self.n_head, C // self.n_head)
+        k = k.view(B, T, self.n_head, C // self.n_head)
+
+        q = self.rotary_pos_emb(q)
+        k = self.rotary_pos_emb(k)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+
+        q = self.rotary_pos_emb(q)
+        k = self.rotary_pos_emb(k)
 
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         attn = attn.transpose(1, 2).contiguous().view(B, T, C)
@@ -141,7 +152,9 @@ class Router(nn.Module):
         exp_cap += exp_cap % 2
         exp_cap = int(exp_cap)
 
-        exp_mask = F.one_hot(topk_indices, num_classes=self.config.n_exp)  # [B, C, K, n_exp]
+        exp_mask = F.one_hot(
+            topk_indices, num_classes=self.config.n_exp
+        )  # [B, C, K, n_exp]
         exp_mask = exp_mask.view(
             num_tokens, self.config.top_k, self.config.n_exp
         )  # [B * C, K, n_exp]
@@ -181,7 +194,7 @@ class Router(nn.Module):
         # reshape tokens into batches for each expert, return both weights and batches
         # [n_exp, exp_capacity, B * C] * [B * C, d] -> [n_exp, exp_capacity, n_embd]
         x = x.view(num_tokens, self.config.n_embd)
-       
+
         return used_cap, cb_weight, sec_mask
 
     def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
@@ -281,7 +294,6 @@ class Codex(nn.Module):
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Embedding(config.vocab_size, config.n_embd),
-                wpe=nn.Embedding(config.block_size, config.n_embd),
                 # use moe for every pth layer if use_moe is true
                 h=nn.ModuleList(
                     [
@@ -354,9 +366,9 @@ class Codex(nn.Module):
         ), f"Sequence length {T} is longer than the block size {self.config.block_size}"
 
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-        pos_emb = self.transformer.wpe(pos)
+
         tok_emb = self.transformer.wte(idx)
-        x = tok_emb + pos_emb
+        x = tok_emb
 
         for block in self.transformer.h:
             x = block(x)
@@ -444,7 +456,7 @@ def get_lr(step, config):
 
 def train(config, device, world_size, rank, local_rank, ddp):
 
-    dataloader = DataloaderLite(4, 1024, config.data, rank, world_size)
+    dataloader = DataloaderLite(8, 1024, config.data, rank, world_size)
     B, T = dataloader.B, dataloader.T
     total_batch_size = config.train.total_batch_size
 

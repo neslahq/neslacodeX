@@ -8,7 +8,7 @@ model:
   capacity_factor: 1.25
   use_router_noise: true
   bias: true
-  use_moe: true
+  use_moe: false
   block_size: 1024
   vocab_size: 50304
   dropout: 0.1
