@@ -55,13 +55,20 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.c_fc = nn.Linear(config.n_embd, 3 * config.n_embd)
-        self.c_proj = nn.Linear(3 * config.n_embd, config.n_embd)
+        d_ff = 3 * config.n_embd
+        assert d_ff % 2 == 0
+        self.c_fc = nn.Linear(config.n_embd, d_ff)
+        self.c_proj = nn.Linear(d_ff // 2, config.n_embd)
         self.c_proj.RESIDUAL_SCALE = 1
-        self.gelu = nn.GELU()
+        self.silu = nn.SiLU()
 
     def forward(self, x):
-        return self.c_proj(self.gelu(self.c_fc(x)))
+        """
+        swiglu based on flash attention implementation
+        """
+        y = self.c_fc(x)
+        y, gate = y.chunk(2, dim=-1)
+        return self.c_proj(self.silu(y) * gate)
 
 
 class MLPExperts(nn.Module):
@@ -364,8 +371,6 @@ class Codex(nn.Module):
         assert (
             T <= self.config.block_size
         ), f"Sequence length {T} is longer than the block size {self.config.block_size}"
-
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
 
         tok_emb = self.transformer.wte(idx)
         x = tok_emb
