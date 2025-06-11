@@ -270,9 +270,9 @@ class Block(nn.Module):
     def __init__(self, config, use_moe=False):
         super().__init__()
 
-        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.ln_1 = nn.RMSNorm(config.n_embd)
         self.attn = Attention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.ln_2 = nn.RMSNorm(config.n_embd)
         if use_moe:
             self.mlp = MOE(config)
         else:
@@ -301,7 +301,7 @@ class Codex(nn.Module):
                         for i in range(config.n_layers)
                     ]
                 ),
-                ln_f=nn.LayerNorm(config.n_embd),
+                ln_f=nn.RMSNorm(config.n_embd),
             )
         )
 
