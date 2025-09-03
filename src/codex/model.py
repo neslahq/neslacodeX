@@ -10,7 +10,7 @@ import math
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchtune.modules import RotaryPositionalEmbeddings
-from utils import MOEManager
+from .utils import MOEManager
 
 MANAGER = MOEManager()
 
@@ -269,7 +269,7 @@ class MOE(nn.Module):
 
         exp_weight = exp_weight.view(num_tokens, -1)
         exp_out = exp_out.view(-1, self.config.n_embd)
-        output = exp_weight @ exp_out
+        output = exp_weight @ exp_out 
         output = output.view(B, T, self.config.n_embd)
         return output
 
@@ -299,7 +299,7 @@ class Codex(nn.Module):
 
         self.config = config
 
-        self.transformer = nn.ModuleDict(
+        self.transformer = nn.ModuleDict( 
             dict(
                 wte=nn.Embedding(config.vocab_size, config.n_embd),
                 # use moe for every pth layer if use_moe is true
@@ -460,7 +460,7 @@ def get_lr(step, config):
     )
 
 
-def train(config, device, world_size, rank, local_rank, ddp):
+def train(config, device="cpu", world_size=1, rank=0, local_rank=0, ddp=False):
 
     dataloader = DataloaderLite(8, 1024, config.data, rank, world_size)
     B, T = dataloader.B, dataloader.T
@@ -475,8 +475,8 @@ def train(config, device, world_size, rank, local_rank, ddp):
     model = Codex(config.model)
     model.to(device)
 
-    if device == "cuda":
-        model = torch.compile(model)
+    # if device == "cuda":
+    #     model = torch.compile(model)
 
     if ddp:
         model = DDP(model, device_ids=[local_rank])
@@ -494,17 +494,20 @@ def train(config, device, world_size, rank, local_rank, ddp):
             for micro_step in range(gradient_accumulation_steps):
                 x, y = dataloader.next_batch()
                 x, y = x.to(device), y.to(device)
+                # Autocast increases computation on the device because it adds dtype conversion operations that wouldn't exist otherwise. But the is little compared to the increase in flops and speed of loading data it provides. 
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
                     logits, loss = model(x, y)
                     loss = loss / gradient_accumulation_steps
                     loss_accum += loss.detach()
                 # we don't want ddp to sync gradients every micro_step
+                #TODO: check if neccesary to use gradient scaling here
                 if ddp:
                     model.require_backward_grad_sync = (
                         micro_step == gradient_accumulation_steps - 1
                     )
                 loss.backward()
             if ddp:
+                # get loss_accum from all processes and average them, so we print the average loss for all processes and not just for rank 0
                 dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
             norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             lr = get_lr(step, config)
@@ -527,10 +530,11 @@ def train(config, device, world_size, rank, local_rank, ddp):
         dist.destroy_process_group()
 
 
-@hydra.main(config_path="config", config_name="config.yaml")
+@hydra.main(config_path="src/codex/config", config_name="config.yaml")
 def main(config):
 
     ddp = int(os.environ.get("RANK", -1)) != -1
+    print(f"DDP: {ddp}")
     if ddp:
         assert torch.cuda.is_available(), "For ddp training, cuda is required"
         dist.init_process_group(backend="nccl")
