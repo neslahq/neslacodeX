@@ -117,9 +117,10 @@ def benchmark(config):
                     f"Step: {step}, lr: {lr}, loss: {loss_accum.item()}, fwd_time: {fdt}ms, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
                 )
 
-    prof.export_stacks("codex_profile.txt", "self_cuda_time_total")
+    prof.export_stacks(config.train.benchmark_output_path, "self_cuda_time_total")
     print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=50))
     if rank == 0:
+        prof.export_stacks(config.train.benchmark_output_path, "self_cuda_time_total")
         fwd_tm = torch.tensor(fdt_m).std()
         total_time = torch.tensor(dt_m).std()
         print(f"fwd_std: {fwd_tm.item()}, bwd_std: {total_time.item()}")

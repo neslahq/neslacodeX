@@ -1,1 +1,1 @@
-torchrun --nnodes=1 benchmark.py data.path=$HOME/neslacodeX/src/data/input.txt
+torchrun --nnodes=1 benchmark.py data.path=$HOME/neslacodeX/src/data/input.txt train.benchmark_output_path=$HOME/neslacodeX/outputs/codex_profile.txt
