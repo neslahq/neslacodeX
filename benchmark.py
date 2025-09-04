@@ -30,7 +30,10 @@ def train_step(step, device, ddp, optimizer, gradient_accumulation_steps, datalo
             )
         if config.train.enable_backward:
             with record_function("backward_pass"):
-                scaler.scale(loss).backward()
+                if config.train.autocast:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
     if ddp:
         # get loss_accum from all processes and average them, so we print the average loss for all processes and not just for rank 0
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
@@ -39,8 +42,11 @@ def train_step(step, device, ddp, optimizer, gradient_accumulation_steps, datalo
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
     with record_function("optimizer_step"):
-        scaler.step(optimizer)
-        scaler.update()
+        if config.train.autocast:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
         optimizer.zero_grad()
 
     torch.cuda.synchronize()
@@ -93,7 +99,7 @@ def benchmark(config):
 
     for step in range(config.train.num_warmups):
         t0 = time.perf_counter()
-        loss_accum, norm, lr , t_hat = train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, scaler,config)
+        loss_accum, norm, lr , t_hat = train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, scaler, config)
         t1 = time.perf_counter()
         fdt = (t_hat - t0) * 1000
         dt = (t1 - t0) * 1000
@@ -122,7 +128,6 @@ def benchmark(config):
 
     print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=50))
     if rank == 0:
-        prof.export_stacks(config.train.benchmark_output_path, "self_cuda_time_total")
         fwd_tm = torch.tensor(fdt_m).std()
         total_time = torch.tensor(dt_m).std()
         if config.train.export_benchmark:
