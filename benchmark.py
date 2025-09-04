@@ -110,14 +110,18 @@ def benchmark(config):
         toks_sec = (B * T * gradient_accumulation_steps * world_size) / (t1 - t0)
         if rank == 0:
             fdt_m.append(fdt)
-            dt_m.append(dt_m)
+            dt_m.append(dt)
             print(
                 f"Step: {step}, lr: {lr}, loss: {loss_accum.item()}, fwd_time: {fdt}ms, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
             )
-    print(f"fwd_std: {np.std(np.array(fdt_m))}, bwd_std: {np.std(np.array(dt_m))}")
+    if rank == 0:
+        fwd_tm = torch.tensor(fdt_m).std()
+        total_time = torch.tensor(dt_m).std()
+        print(f"fwd_std: {fwd_tm.item()}, bwd_std: {total_time.item()}")
         
     if ddp:
         dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     benchmark()

@@ -26,7 +26,7 @@ model:
     warmup_steps: 10
 
 data:
-  path: 
+  path: /teamspace/studios/this_studio/neslacodeX/src/data/input.txt
 
 train:
   epochs: 1
