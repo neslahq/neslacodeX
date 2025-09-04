@@ -1,10 +1,49 @@
 import os
 import hydra
 import torch
+import numpy as np
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import time
 from src.codex.model import Codex, DataloaderLite, get_lr
+
+
+def train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, config):
+    optimizer.zero_grad()
+    loss_accum = 0.0
+    for micro_step in range(gradient_accumulation_steps):
+        x, y = dataloader.next_batch()
+        x, y = x.to(device), y.to(device)
+        # Autocast increases computation on the device because it adds dtype conversion operations that wouldn't exist otherwise. But the is little compared to the increase in flops and speed of loading data it provides. 
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+            torch.cuda.synchronize()
+            t_hat = time.perf_counter()
+            loss = loss / gradient_accumulation_steps
+            loss_accum += loss.detach()
+        # we don't want ddp to sync gradients every micro_step
+        #TODO: check if neccesary to use gradient scaling here
+        if ddp:
+            model.require_backward_grad_sync = (
+                micro_step == gradient_accumulation_steps - 1
+            )
+        loss.backward()
+    if ddp:
+        # get loss_accum from all processes and average them, so we print the average loss for all processes and not just for rank 0
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    lr = get_lr(step, config)
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+    optimizer.step()
+    if device == "cuda":
+        torch.cuda.synchronize()
+    if device == "mps":
+        torch.mps.synchronize()
+    
+    return loss_accum, norm, lr, t_hat
+    
+
 
 
 @hydra.main(config_name="benchmark_config.yaml")
@@ -48,46 +87,35 @@ def benchmark(config):
     optimizer = raw_model.configure_optimizer(device)
 
     # for epoch in range(config.train.epochs):
-
-    for step in range(config.train.max_steps):
-        t0 = time.time()
-        optimizer.zero_grad()
-        loss_accum = 0.0
-        for micro_step in range(gradient_accumulation_steps):
-            x, y = dataloader.next_batch()
-            x, y = x.to(device), y.to(device)
-            # Autocast increases computation on the device because it adds dtype conversion operations that wouldn't exist otherwise. But the is little compared to the increase in flops and speed of loading data it provides. 
-            with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                logits, loss = model(x, y)
-                loss = loss / gradient_accumulation_steps
-                loss_accum += loss.detach()
-            # we don't want ddp to sync gradients every micro_step
-            #TODO: check if neccesary to use gradient scaling here
-            if ddp:
-                model.require_backward_grad_sync = (
-                    micro_step == gradient_accumulation_steps - 1
-                )
-            loss.backward()
-        if ddp:
-            # get loss_accum from all processes and average them, so we print the average loss for all processes and not just for rank 0
-            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        lr = get_lr(step, config)
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = lr
-        optimizer.step()
-        if device == "cuda":
-            torch.cuda.synchronize()
-        if device == "mps":
-            torch.mps.synchronize()
-        t1 = time.time()
+    for step in range(config.train.num_warmups):
+        t0 = time.perf_counter()
+        loss_accum, norm, lr , t_hat = train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, config)
+        t1 = time.perf_counter()
+        fdt = (t_hat - t0) * 1000
         dt = (t1 - t0) * 1000
         toks_sec = (B * T * gradient_accumulation_steps * world_size) / (t1 - t0)
         if rank == 0:
             print(
-                f"Step: {step}, lr: {lr}, loss: {loss_accum.item()}, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
+                f"Step: {step}, lr: {lr}, loss: {loss_accum.item()}, fwd_time: {fdt}ms, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
             )
 
+    fdt_m = []
+    dt_m = []
+    for step in range(config.train.max_steps):
+        t0 = time.perf_counter()
+        loss_accum, norm, lr, t_hat = train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, config)
+        t1 = time.perf_counter()
+        fdt = (t_hat - t0) * 1000
+        dt = (t1 - t0) * 1000
+        toks_sec = (B * T * gradient_accumulation_steps * world_size) / (t1 - t0)
+        if rank == 0:
+            fdt_m.append(fdt)
+            dt_m.append(dt_m)
+            print(
+                f"Step: {step}, lr: {lr}, loss: {loss_accum.item()}, fwd_time: {fdt}ms, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
+            )
+    print(f"fwd_std: {np.std(np.array(fdt_m))}, bwd_std: {np.std(np.array(dt_m))}")
+        
     if ddp:
         dist.destroy_process_group()
 
