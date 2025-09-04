@@ -35,3 +35,5 @@ train:
   ddp: false
   gradient_accumulation: false
   num_warmups: 1
+  autocast: false
+  enable_backward: false

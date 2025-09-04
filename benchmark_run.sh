@@ -1,2 +1,1 @@
-torchrun --nnodes=1 benchmark.py
-# python benchmark.py
+torchrun --nnodes=1 benchmark.py data.path=$HOME/neslacodeX/src/data/input.txt
