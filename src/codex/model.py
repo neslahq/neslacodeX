@@ -485,6 +485,8 @@ def train(config, device="cpu", world_size=1, rank=0, local_rank=0, ddp=False):
 
     optimizer = raw_model.configure_optimizer(device)
 
+    scaler = torch.amp.GradScaler()
+
     for epoch in range(config.train.epochs):
 
         for step in range(config.train.max_steps):
@@ -505,7 +507,7 @@ def train(config, device="cpu", world_size=1, rank=0, local_rank=0, ddp=False):
                     model.require_backward_grad_sync = (
                         micro_step == gradient_accumulation_steps - 1
                     )
-                loss.backward()
+                scaler.scale(loss).backward()
             if ddp:
                 # get loss_accum from all processes and average them, so we print the average loss for all processes and not just for rank 0
                 dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
@@ -513,7 +515,9 @@ def train(config, device="cpu", world_size=1, rank=0, local_rank=0, ddp=False):
             lr = get_lr(step, config)
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
             if device == "cuda":
                 torch.cuda.synchronize()
             if device == "mps":

@@ -10,7 +10,7 @@ from src.codex.model import Codex, DataloaderLite, get_lr
 from torch.profiler import profile, record_function, ProfilerActivity
 
 
-def train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, config):
+def train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, scaler, config):
     loss_accum = 0.0
     for micro_step in range(gradient_accumulation_steps):
         x, y = dataloader.next_batch()
@@ -30,7 +30,7 @@ def train_step(step, device, ddp, optimizer, gradient_accumulation_steps, datalo
             )
         if config.train.enable_backward:
             with record_function("backward_pass"):
-                loss.backward()
+                scaler.scale(loss).backward()
     if ddp:
         # get loss_accum from all processes and average them, so we print the average loss for all processes and not just for rank 0
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
@@ -39,7 +39,8 @@ def train_step(step, device, ddp, optimizer, gradient_accumulation_steps, datalo
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
     with record_function("optimizer_step"):
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         optimizer.zero_grad()
 
     torch.cuda.synchronize()
@@ -88,9 +89,11 @@ def benchmark(config):
 
     optimizer = raw_model.configure_optimizer(device)
 
+    scaler = torch.amp.GradScaler()
+
     for step in range(config.train.num_warmups):
         t0 = time.perf_counter()
-        loss_accum, norm, lr , t_hat = train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, config)
+        loss_accum, norm, lr , t_hat = train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, scaler,config)
         t1 = time.perf_counter()
         fdt = (t_hat - t0) * 1000
         dt = (t1 - t0) * 1000
@@ -105,7 +108,7 @@ def benchmark(config):
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True), record_shapes=True, profile_memory=False, with_stack=True) as prof:
         for step in range(config.train.max_steps):
             t0 = time.perf_counter()
-            loss_accum, norm, lr, t_hat = train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, config)
+            loss_accum, norm, lr, t_hat = train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, scaler, config)
             t1 = time.perf_counter()
             fdt = (t_hat - t0) * 1000
             dt = (t1 - t0) * 1000
@@ -117,12 +120,13 @@ def benchmark(config):
                     f"Step: {step}, lr: {lr}, loss: {loss_accum.item()}, fwd_time: {fdt}ms, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
                 )
 
-    prof.export_stacks(config.train.benchmark_output_path, "self_cuda_time_total")
     print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=50))
     if rank == 0:
         prof.export_stacks(config.train.benchmark_output_path, "self_cuda_time_total")
         fwd_tm = torch.tensor(fdt_m).std()
         total_time = torch.tensor(dt_m).std()
+        if config.train.export_benchmark:
+            prof.export_stacks("codex_profile.txt", "self_cuda_time_total")
         print(f"fwd_std: {fwd_tm.item()}, bwd_std: {total_time.item()}")
         
     if ddp:

@@ -38,3 +38,4 @@ train:
   autocast: false
   enable_backward: false
   benchmark_output_path: ''
+  export_benchmark: false
