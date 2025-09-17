@@ -340,7 +340,7 @@ class Codex(nn.Module):
             if module.bias_proj is not None:
                 torch.nn.init.zeros_(module.bias_proj)
 
-    def configure_optimizer(self, device_type):
+    def configure_optimizer(self, device_type=None):
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
 
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
