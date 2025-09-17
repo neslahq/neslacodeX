@@ -111,7 +111,8 @@ def benchmark(config):
 
     fdt_m = []
     dt_m = []
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True), record_shapes=True, profile_memory=False, with_stack=True) as prof:
+    torch.cuda.memory._record_memory_history(max_entries=1000)
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True), record_shapes=True, profile_memory=True, with_stack=True) as prof:
         for step in range(config.train.max_steps):
             t0 = time.perf_counter()
             loss_accum, norm, lr, t_hat = train_step(step, device, ddp, optimizer, gradient_accumulation_steps, dataloader, model, scaler, config)
@@ -126,13 +127,17 @@ def benchmark(config):
                     f"Step: {step}, lr: {lr}, loss: {loss_accum.item()}, fwd_time: {fdt}ms, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
                 )
 
-    print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=50))
+    print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
     if rank == 0:
         fwd_tm = torch.tensor(fdt_m).std()
         total_time = torch.tensor(dt_m).std()
         if config.train.export_benchmark:
+            torch.cuda.memory._dump_snapshot("codex_profile.pickle")
             prof.export_stacks("codex_profile.txt", "self_cuda_time_total")
+            prof.export_chrome_trace("codex_profile.json")
+            prof.export_memory_timeline("codex_profile.html")
         print(f"fwd_std: {fwd_tm.item()}, bwd_std: {total_time.item()}")
+    torch.cuda.memory._record_memory_history(enabled=None)
         
     if ddp:
         dist.destroy_process_group()

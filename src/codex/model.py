@@ -475,8 +475,8 @@ def train(config, device="cpu", world_size=1, rank=0, local_rank=0, ddp=False):
     model = Codex(config.model)
     model.to(device)
 
-    # if device == "cuda":
-    #     model = torch.compile(model)
+    if device == "cuda":
+        model = torch.compile(model)
 
     if ddp:
         model = DDP(model, device_ids=[local_rank])
@@ -502,7 +502,6 @@ def train(config, device="cpu", world_size=1, rank=0, local_rank=0, ddp=False):
                     loss = loss / gradient_accumulation_steps
                     loss_accum += loss.detach()
                 # we don't want ddp to sync gradients every micro_step
-                #TODO: check if neccesary to use gradient scaling here
                 if ddp:
                     model.require_backward_grad_sync = (
                         micro_step == gradient_accumulation_steps - 1
