@@ -6,6 +6,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import time
 from src.codex.model import Codex, DataloaderLite, get_lr
+from tests.model import CodexTest
 
 from torch.profiler import profile, record_function, ProfilerActivity
 
@@ -84,7 +85,8 @@ def benchmark(config):
     else:
         gradient_accumulation_steps = 1
 
-    model = Codex(config.model)
+    model = CodexTest(config.model)
+    # model = Codex(config.model)
     model.to(device)
 
     
@@ -132,10 +134,10 @@ def benchmark(config):
         fwd_tm = torch.tensor(fdt_m).std()
         total_time = torch.tensor(dt_m).std()
         if config.train.export_benchmark:
-            torch.cuda.memory._dump_snapshot("codex_profile.pickle")
-            prof.export_stacks("codex_profile.txt", "self_cuda_time_total")
+            # torch.cuda.memory._dump_snapshot("codex_profile.pickle")
+            # prof.export_stacks("codex_profile.txt", "self_cuda_time_total")
             prof.export_chrome_trace("codex_profile.json")
-            prof.export_memory_timeline("codex_profile.html")
+            # prof.export_memory_timeline("codex_profile.html")
         print(f"fwd_std: {fwd_tm.item()}, bwd_std: {total_time.item()}")
     torch.cuda.memory._record_memory_history(enabled=None)
         

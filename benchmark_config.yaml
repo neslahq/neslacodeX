@@ -30,12 +30,12 @@ data:
 
 train:
   epochs: 1
-  max_steps: 50
+  max_steps: 10
   total_batch_size: 524288 
   ddp: false
   gradient_accumulation: false
-  num_warmups: 1
+  num_warmups: 0
   autocast: false
-  enable_backward: false
+  enable_backward: true
   benchmark_output_path: ''
-  export_benchmark: false
+  export_benchmark: true
