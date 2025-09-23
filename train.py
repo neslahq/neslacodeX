@@ -89,7 +89,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # init distributed and build meshes
         dist_utils.init_distributed(
-            job_config.comm,  # where is this from?
+            job_config.comm,
             enable_cpu_backend=job_config.training.enable_cpu_offload,
             base_folder=job_config.job.dump_folder,
         )
@@ -104,6 +104,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ep=parallelism_config.expert_parallel_degree,
             etp=parallelism_config.expert_tensor_parallel_degree,
             world_size=world_size,
+            order=parallelism_config.order,
         )
 
         world_mesh = parallel_dims.world_mesh

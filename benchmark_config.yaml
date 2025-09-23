@@ -1,61 +1,71 @@
+job:
+  dump_folder:"./outputs"
+  description: "Llama 3 8B training"
+
+profiling:
+  enable_profiling: true
+  save_traces_folder: "profile_trace"
+  profile_freq: 100
+
+metrics:
+  log_freq: 10
+  enable_tensorboard: true
+  save_tb_folder: "tb"
+
 model:
-  n_embd: 768
-  n_head: 12
-  n_layers: 12
+  name: "codextest"
+  flavor: "small"
+  hf_assets_path: "./assets/hf/Llama-3.1-8B"
+  converters: []
+  tokenizer_name: "gpt2"
+
+optimizer:
+  name: "AdamW"
+  lr: 3e-4
+  eps: 1e-8
+
+lr_scheduler:
+  warmup_steps: 200  # lr scheduler warm up
+
+training:
+  local_batch_size: 1
   seq_len: 1024
-  n_exp: 5 
-  p: 2
-  top_k: 4
-  capacity_factor: 1.25
-  use_router_noise: true
-  bias: true
-  use_moe: false
-  block_size: 1024
-  vocab_size: 50304
-  dropout: 0.1
-  use_router_z_loss: true
-  use_aux_loss: true
-  aux_loss_weight: 0.01
-  router_z_loss_weight: 0.001
-  matmul_precision: highest
-  use_flex_attn: false
-  optimizer:
-    name: AdamW
-    learning_rate: 6e-4
-    weight_decay: 0.1
-    max_lr: 6e-4
-    min_lr: 6e-5
-    warmup_steps: 10
-  compile:
-    enable: false
-
-data:
-  path: ''
-
-train:
-  epochs: 1
-  max_steps: 10
-  total_batch_size: 524288 
-  ddp: false
-  gradient_accumulation: false
-  num_warmups: 0
-  autocast: false
-  enable_backward: true
-  benchmark_output_path: ''
-  export_benchmark: true
-  enable_cpu_offload: false
-  activation_checkpoint:
-    mode: "none"
-  mixed_precision_param: "bfloat16"
-  mixed_precision_reduce: "bfloat16"
+  max_norm: 1.0  # grad norm clipping
+  steps: 1000
+  dataset: "shakespeare"
+  dataset_path: " "
 
 parallelism:
-  pipeline_parallel_schedule: "1F1B"
-  pipeline_parallel_layers_per_stage: None
-  pipeline_parallel_first_stage_less_layers: 1
-  pipeline_parallel_last_stage_less_layers: 1
+  data_parallel_replicate_degree: 1
+  data_parallel_shard_degree: -1
+  tensor_parallel_degree: 1
+  pipeline_parallel_degree: 1
   context_parallel_degree: 1
-  disable_loss_parallel: false
-  enable_compiled_autograd: false
-  
+  order:["dp_replicate", "pp", "tp"]
 
+checkpoint:
+  enable: false
+  folder: "checkpoint"
+  interval: 500
+  last_save_model_only: true
+  export_dtype: "float32"
+  async_mode: "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+
+compile:
+  enable: false
+  components: ["model", "loss"]
+
+activation_checkpoint:
+  mode: "selective"  # ["none", "selective", "full"]
+  selective_ac_option: "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
+
+float8:
+  enable_fsdp_float8_all_gather: false
+  precompute_float8_dynamic_scale_for_fsdp: false
+  filter_fqns: ["output"]
+
+validation:
+  enable: false
+  dataset: "c4_validation"
+  freq: 500
+  steps: 1200 # Recommend value for c4_validation with world-size=8 and seq_len=8192

@@ -66,7 +66,7 @@ def parallelize_codex(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    use_flex_attn = job_config.model.use_flex_attn
+    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
     if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
@@ -92,8 +92,7 @@ def parallelize_codex(
         # maybe_enable_async_tp(job_config, world_mesh["tp"])
 
     model_compile_enabled = (
-        job_config.model.compile.enable
-        # and "model" in job_config.compile.components
+        job_config.compile.enable and "model" in job_config.compile.components
     )
 
     if job_config.activation_checkpoint.mode != "none":
