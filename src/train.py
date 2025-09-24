@@ -638,8 +638,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.metrics_processor.close()
 
 
-@hydra.main(config_path="config", config_name="config.yaml")
+@hydra.main()
 def main(config=None):
+    print("Starting training with config: ", config)
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args(config)
