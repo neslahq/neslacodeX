@@ -43,25 +43,20 @@ class ConfigManager:
         self.config: JobConfig = config_cls()
         self.register_tyro_rules(custom_registry)
 
-    def parse_args(
-        self, config: dict[str, Any] = None, args: list[str] = sys.argv[1:]
-    ) -> JobConfig:
-        if config is None:
-            toml_values = self._maybe_load_toml(args)
-            config_cls = self._maybe_add_custom_args(args, toml_values)
+    def parse_args(self, args: list[str] = sys.argv[1:]) -> JobConfig:
 
-            base_config = (
-                self._dict_to_dataclass(config_cls, toml_values)
-                if toml_values
-                else config_cls()
-            )
+        toml_values = self._maybe_load_toml(args)
+        config_cls = self._maybe_add_custom_args(args, toml_values)
 
-            self.config = tyro.cli(
-                config_cls, args=args, default=base_config, registry=custom_registry
-            )
-        else:
-            self.config = self._dict_to_dataclass(self.config_cls, config)
-            print(isinstance(self.config, JobConfig))
+        base_config = (
+            self._dict_to_dataclass(config_cls, toml_values)
+            if toml_values
+            else config_cls()
+        )
+
+        self.config = tyro.cli(
+            config_cls, args=args, default=base_config, registry=custom_registry
+        )
 
         self._validate_config()
 
