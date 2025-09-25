@@ -10,6 +10,7 @@ import time
 from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
+import hydra
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
@@ -638,7 +639,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.metrics_processor.close()
 
 
-@hydra.main()
+@hydra.main(config_path="", config_name="")
 def main(config=None):
     print("Starting training with config: ", config)
     init_logger()

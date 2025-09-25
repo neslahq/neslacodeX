@@ -7,11 +7,6 @@
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-from torch import nn
-
-from torchtitan.protocols.train_spec import BaseModelArgs
-from torchtitan.tools.logging import logger
-
 
 @dataclass
 class Job:

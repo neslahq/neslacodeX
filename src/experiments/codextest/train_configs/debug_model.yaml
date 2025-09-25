@@ -1,5 +1,5 @@
 job:
-  dump_folder:"./outputs"
+  dump_folder: "./outputs"
   description: "codextest training"
 
 profiling:
@@ -18,6 +18,7 @@ model:
   hf_assets_path: "./assets/hf/Llama-3.1-8B"
   converters: []
   tokenizer_name: "gpt2"
+  tokenizer_path: ""
 
 optimizer:
   name: "AdamW"
@@ -41,7 +42,7 @@ parallelism:
   tensor_parallel_degree: 1
   pipeline_parallel_degree: 1
   context_parallel_degree: 1
-  order:["dp_replicate", "pp", "tp"]
+  order: ["dp_replicate", "pp", "tp"]
 
 checkpoint:
   enable: false

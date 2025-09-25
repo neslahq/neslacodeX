@@ -11,9 +11,9 @@ set -ex
 # e.g.
 # LOG_RANK=0,1 NGPU=4 ./run_train.sh
 NNODES=${NNODES:-"1"}
-NGPU=${NGPU:-"8"}
+NGPU=${NGPU:-"1"}
 export LOG_RANK=${LOG_RANK:-0}
-CONFIG_FILE=${CONFIG_FILE:-"./src/experiments/codextest/train_configs"}
+CONFIG_FILE=${CONFIG_FILE:-"./experiments/codextest/train_configs"}
 CONFIG_NAME=${CONFIG_NAME:-"debug_model"}
 TRAIN_FILE=${TRAIN_FILE:-"src.train"}
 
@@ -23,4 +23,5 @@ PYTORCH_ALLOC_CONF="expandable_segments:True" \
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
 torchrun --nnodes=${NNODES} --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
--m ${TRAIN_FILE} --config-path ${CONFIG_FILE} --config-name ${CONFIG_NAME} "$@"
+-m ${TRAIN_FILE} --config-path ${CONFIG_FILE} --config-name ${CONFIG_NAME} "$@"\
+    training.dataset_path=$HOME/neslacodeX/src/data/input.txt

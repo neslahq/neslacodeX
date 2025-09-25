@@ -61,6 +61,7 @@ class ConfigManager:
             )
         else:
             self.config = self._dict_to_dataclass(self.config_cls, config)
+            print(isinstance(self.config, JobConfig))
 
         self._validate_config()
 
