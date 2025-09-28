@@ -10,6 +10,7 @@ import time
 from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
+import hydra
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
@@ -636,7 +637,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.checkpointer.close()
         if self.metrics_processor:
             self.metrics_processor.close()
-
 
 def main():
     init_logger()

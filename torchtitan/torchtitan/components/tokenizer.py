@@ -43,10 +43,10 @@ class GPTTokenizer(BaseTokenizer):
         self.tokenizer = tiktoken.get_encoding(tokenizer_name)
 
     def encode(self, *args, **kwargs) -> list[int]:
-        return self.tokenizer.encode(*args, **kwargs)
+        return self.tokenizer.encode(*args)
 
     def decode(self, *args, **kwargs) -> str:
-        return self.tokenizer.decode(*args, **kwargs)
+        return self.tokenizer.decode(*args)
 
     def get_vocab_size(self) -> int:
         return self.tokenizer.max_token_value + 1

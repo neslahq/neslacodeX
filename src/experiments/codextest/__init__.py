@@ -12,10 +12,10 @@ from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-from .parallelize import parallelize_codex
-from .pipeline import pipeline_codex
-from .args import CodexTestModelArgs
-from .model import CodexTest
+from .infra.parallelize import parallelize_codex
+from .infra.pipeline import pipeline_codex
+from .model.args import CodexTestModelArgs
+from .model.model import CodexTest
 
 
 __all__ = [
@@ -52,6 +52,5 @@ register_train_spec(
         build_tokenizer_fn=build_gpt_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
-        state_dict_adapter=Llama3StateDictAdapter,
     )
 )

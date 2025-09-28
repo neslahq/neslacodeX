@@ -15,16 +15,22 @@ class CodexTest(nn.Module):
         self.relu = nn.ReLU()
         self.config = config
 
-    def forward(self, x, targets=None):
+    def init_weights(self, buffer_device=None):
+        nn.init.normal_(self.embedding_layer.weight)
+        for layer in self.layers:
+            nn.init.normal_(layer.weight)
+        nn.init.normal_(self.output_layer.weight)
+
+    def forward(self, x, input_batch=None):
         x = self.embedding_layer(x)
         for layer in self.layers:
             x = self.relu(layer(x))
 
         x = self.output_layer(x)
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(x.view(-1, x.size(-1)), targets.view(-1))
-        return x, loss
+        # loss = None
+        # if targets is not None:
+        #     loss = F.cross_entropy(x.view(-1, x.size(-1)), targets.view(-1))
+        return x
 
     def configure_optimizer(self, device_type=None):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.config.optimizer.learning_rate)

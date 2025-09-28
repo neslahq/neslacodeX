@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 import torch.distributed.checkpoint as dcp
 import torchtitan.protocols.train_spec as train_spec_module
-from torch.distributed.checkpoint._hf_storage import _HuggingFaceStorageReader as HuggingFaceStorageReader
+from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torchtitan.components.checkpoint import ModelWrapper
 
 

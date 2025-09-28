@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 from functools import partial
 from typing import Any, Callable
 
@@ -32,7 +33,15 @@ def _process_c4_text(sample: dict[str, Any]) -> str:
 
 
 def _load_shakespeare_dataset(dataset_path: str):
-    return load_dataset("text", data_dir=dataset_path)
+    # Expand environment variables in the path
+    expanded_path = os.path.expandvars(dataset_path)
+    
+    # If dataset_path points to a directory, use the standard text loader
+    if os.path.isdir(expanded_path):
+        return load_dataset("text", data_dir=expanded_path)
+    # If dataset_path points to a single file, load it directly
+    else:
+        return load_dataset("text", data_files=expanded_path)
 
 
 def _process_shakespeare_text(sample: dict[str, Any]) -> str:

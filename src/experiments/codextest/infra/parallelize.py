@@ -60,13 +60,13 @@ def parallelize_codex(
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
     assert (
-        job_config.model.seq_len % parallel_dims.seq_len_divisor == 0
+        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
-        Sequence length {job_config.model.seq_len} must be divisible by the product of TP degree
+        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+    use_flex_attn = getattr(model.config, "use_flex_attn", False)
     if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 

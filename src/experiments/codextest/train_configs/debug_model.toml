@@ -33,8 +33,7 @@ local_batch_size = 1
 seq_len = 1024
 max_norm = 1.0  # grad norm clipping
 steps = 1000
-dataset = "shakespeare"
-dataset_path = "$HOME/neslacodeX/data/input.txt"
+dataset = "c4"
 
 [parallelism]
 data_parallel_replicate_degree = 1
