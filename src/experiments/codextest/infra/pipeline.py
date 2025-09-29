@@ -29,6 +29,99 @@ from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
 
 
+def generate_codex_fqn_per_model_part(
+    num_stages: int,
+    num_layers: int,
+    input_weight: int = 1,
+    output_weight: int = 1,
+) -> list[list[str]]:
+    """
+    Generate module names for CodexTest model pipeline parallel splitting.
+    
+    Args:
+        num_stages: Number of pipeline stages
+        num_layers: Total number of layers in the model
+        input_weight: Weight for input modules (embedding_layer) in layer calculation
+        output_weight: Weight for output modules (output_layer) in layer calculation
+        
+    Returns:
+        List of lists containing module names for each model part
+    """
+    if num_stages < 1:
+        raise ValueError("Number of stages must be at least 1")
+
+    if num_stages == 1:
+        # Single stage gets everything
+        layer_names = [f"layers.{i}" for i in range(num_layers)]
+        return [["embedding_layer"] + layer_names + ["output_layer"]]
+
+    # Calculate effective layers including weights
+    num_effective_layers = num_layers + input_weight + output_weight
+
+    if num_stages > num_effective_layers:
+        raise ValueError(
+            f"Number of stages ({num_stages}) cannot be greater than effective layers ({num_effective_layers})"
+        )
+
+    # Calculate layers per stage (distribute evenly)
+    layers_per_stage = num_effective_layers // num_stages
+    extra_layers = num_effective_layers % num_stages
+
+    # Feasibility check: Ensure at least 1 layer in each PP stage
+    if layers_per_stage == 0:
+        raise ValueError(
+            f"Number of stages ({num_stages}) cannot be greater than effective layers ({num_effective_layers})"
+        )
+
+    module_names_per_stage = []
+    current_layer = 0
+
+    for stage_idx in range(num_stages):
+        stage_modules = []
+
+        # Calculate effective layers for this stage
+        effective_layers_for_stage = layers_per_stage
+        if stage_idx < extra_layers:
+            effective_layers_for_stage += 1
+
+        # First stage: handle input modules with weighting
+        if stage_idx == 0:
+            stage_modules.append("embedding_layer")
+            # Account for input weight in layer distribution
+            remaining_layers_for_stage = effective_layers_for_stage - input_weight
+
+            # Add transformer layers
+            for _ in range(remaining_layers_for_stage):
+                if current_layer < num_layers:
+                    stage_modules.append(f"layers.{current_layer}")
+                    current_layer += 1
+
+        # Last stage: handle output modules with weighting
+        elif stage_idx == num_stages - 1:
+            # Account for output weight in layer distribution
+            remaining_layers_for_stage = effective_layers_for_stage - output_weight
+
+            # Add transformer layers
+            for _ in range(remaining_layers_for_stage):
+                if current_layer < num_layers:
+                    stage_modules.append(f"layers.{current_layer}")
+                    current_layer += 1
+
+            # Add output modules
+            stage_modules.append("output_layer")
+
+        # Middle stages: only transformer layers
+        else:
+            for _ in range(effective_layers_for_stage):
+                if current_layer < num_layers:
+                    stage_modules.append(f"layers.{current_layer}")
+                    current_layer += 1
+
+        module_names_per_stage.append(stage_modules)
+
+    return module_names_per_stage
+
+
 def pipeline_codex(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -106,7 +199,8 @@ def pipeline_codex(
 
     module_names_per_stage = job_config.parallelism.module_fqns_per_model_part
     if module_names_per_stage is None:
-        module_names_per_stage = generate_llm_fqn_per_model_part(
+        # Use custom module splitting for CodexTest model
+        module_names_per_stage = generate_codex_fqn_per_model_part(
             num_virtual_stages, num_layers, input_weight, output_weight
         )
     for i, stage_ms in enumerate(module_names_per_stage):

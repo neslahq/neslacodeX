@@ -16,17 +16,22 @@ class CodexTest(nn.Module):
         self.config = config
 
     def init_weights(self, buffer_device=None):
-        nn.init.normal_(self.embedding_layer.weight)
+        # check if the embedding layer, layers, and output layer are not None before initializing the weights incase of pipeline parallel
+        if self.embedding_layer is not None:
+            nn.init.normal_(self.embedding_layer.weight)
         for layer in self.layers:
-            nn.init.normal_(layer.weight)
-        nn.init.normal_(self.output_layer.weight)
+            if layer is not None:
+                nn.init.normal_(layer.weight)
+        if self.output_layer is not None:
+            nn.init.normal_(self.output_layer.weight)
 
     def forward(self, x, input_batch=None):
-        x = self.embedding_layer(x)
+        x = self.embedding_layer(x) if self.embedding_layer else x
         for layer in self.layers:
-            x = self.relu(layer(x))
+            if layer is not None:
+                x = self.relu(layer(x)) if self.relu is not None else layer(x)
 
-        x = self.output_layer(x)
+        x = self.output_layer(x) if self.output_layer else x
         # loss = None
         # if targets is not None:
         #     loss = F.cross_entropy(x.view(-1, x.size(-1)), targets.view(-1))

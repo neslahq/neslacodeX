@@ -11,8 +11,8 @@ set -ex
 # e.g.
 # LOG_RANK=0,1 NGPU=4 ./run_train.sh
 NNODES=${NNODES:-"1"}
-NGPU=${NGPU:-"1"}
-export LOG_RANK=${LOG_RANK:-0}
+NGPU=${NGPU:-"2"}
+export LOG_RANK=${LOG_RANK:-0,1}
 CONFIG_FILE=${CONFIG_FILE:-"${HOME}/neslacodeX/src/experiments/codextest/train_configs/debug_model.toml"}
 TRAIN_FILE=${TRAIN_FILE:-"src.train"}
 

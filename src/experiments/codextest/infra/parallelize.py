@@ -221,7 +221,7 @@ def apply_tp(
         layer_plan = colwise_parallel()
 
         parallelize_module(
-            module=transformer_block,
+            module=layer,
             device_mesh=tp_mesh,
             parallelize_plan=layer_plan,
         )
