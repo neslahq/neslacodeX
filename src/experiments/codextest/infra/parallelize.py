@@ -155,23 +155,7 @@ def apply_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "embedding_layer": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-            ),
-            # "norm": SequenceParallel(),
-            "output_layer": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
-            ),
-        },
-    )
-
+    
     # Parallel styles used for transformer block linear weights and their
     # inputs may be different for float8 linears with tensorwise scaling.
     if enable_float8_tensorwise_tp:
@@ -194,37 +178,55 @@ def apply_tp(
             PrepareModuleInput,
         )
 
-    # Apply tensor + sequence parallelism to every transformer block
-    # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
-    #       by folding (and unfolding) the batch dimension and the sequence dimension.
-    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    for layer in model.layers:
-        # layer_plan = {
-        #     "attention_norm": SequenceParallel(),
-        #     "attention": prepare_module_input(
-        #         input_layouts=(Shard(1), None),
-        #         desired_input_layouts=(Replicate(), None),
-        #     ),
-        #     "attention.wq": colwise_parallel(),
-        #     "attention.wk": colwise_parallel(),
-        #     "attention.wv": colwise_parallel(),
-        #     "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-        #     "ffn_norm": SequenceParallel(),
-        #     "feed_forward": prepare_module_input(
-        #         input_layouts=(Shard(1),),
-        #         desired_input_layouts=(Replicate(),),
-        #     ),
-        #     "feed_forward.w1": colwise_parallel(),
-        #     "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-        #     "feed_forward.w3": colwise_parallel(),
-        # }
-        layer_plan = colwise_parallel()
-
+    # Create a plan for the entire model including all layers
+    model_plan = {
+        "embedding_layer": RowwiseParallel(
+            input_layouts=Replicate(),
+            output_layouts=Replicate(),
+        ),
+        "output_layer": prepare_module_input(
+            input_layouts=(Shard(-1),),  # Expect feature-sharded input
+            desired_input_layouts=(Replicate(),)  # Convert to replicated for ColwiseParallel
+        ),
+    }
+    
+    # First apply the main model components
+    parallelize_module(
+        model,
+        tp_mesh,
+        model_plan,
+    )
+    
+    # Then apply PrepareModuleInput to layers 1+ to convert layouts
+    for i in range(1, len(model.layers)):
+        parallelize_module(
+            module=model.layers[i],
+            device_mesh=tp_mesh,
+            parallelize_plan=prepare_module_input(
+                input_layouts=(Shard(-1),),  # Expect feature-sharded input
+                desired_input_layouts=(Replicate(),)  # Convert to replicated
+            ),
+        )
+    
+    # Finally apply ColwiseParallel to all layers and output layer
+    for i, layer in enumerate(model.layers):
         parallelize_module(
             module=layer,
             device_mesh=tp_mesh,
-            parallelize_plan=layer_plan,
+            parallelize_plan=colwise_parallel(
+                output_layouts=Shard(-1)  # Shard the output feature dimension
+            ),
         )
+    
+    # Apply ColwiseParallel to output layer
+    parallelize_module(
+        module=model.output_layer,
+        device_mesh=tp_mesh,
+        parallelize_plan=colwise_parallel(
+            output_layouts=Shard(-1) if loss_parallel else Replicate(),
+            use_local_output=not loss_parallel,
+        ),
+    )
 
     logger.info(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
