@@ -39,6 +39,8 @@ class ParallelDims:
                 self.p_map[strategy] = self.pp
             elif strategy == 'dp_replicate':
                 self.p_map[strategy] = self.dp_replicate
+            elif strategy == 'dp_shard':
+                self.p_map[strategy] = self.dp_shard
         self._validate()
 
     def _validate(self):

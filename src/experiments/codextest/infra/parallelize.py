@@ -185,7 +185,8 @@ def apply_tp(
             output_layouts=Replicate(),
         ),
         "output_layer": prepare_module_input(
-            input_layouts=(Shard(-1),),  # Expect feature-sharded input
+            # input_layouts=(Shard(-1),),
+            input_layouts=(Shard(0),),  # Expect batch-sharded input from last layer
             desired_input_layouts=(Replicate(),)  # Convert to replicated for ColwiseParallel
         ),
     }
@@ -209,24 +210,26 @@ def apply_tp(
         )
     
     # Finally apply ColwiseParallel to all layers and output layer
+    n_layers = len(model.layers)
     for i, layer in enumerate(model.layers):
         parallelize_module(
             module=layer,
             device_mesh=tp_mesh,
             parallelize_plan=colwise_parallel(
-                output_layouts=Shard(-1)  # Shard the output feature dimension
-            ),
+                output_layouts=Shard(-1)   # Shard the output feature dimension
+            ) if i < n_layers - 1 else rowwise_parallel(),
         )
     
     # Apply ColwiseParallel to output layer
-    parallelize_module(
-        module=model.output_layer,
-        device_mesh=tp_mesh,
-        parallelize_plan=colwise_parallel(
-            output_layouts=Shard(-1) if loss_parallel else Replicate(),
-            use_local_output=not loss_parallel,
-        ),
-    )
+    if model.output_layer is not None:
+        parallelize_module(
+            module=model.output_layer,
+            device_mesh=tp_mesh,
+            parallelize_plan=colwise_parallel(
+                output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                use_local_output=not loss_parallel,
+            ),
+        )
 
     logger.info(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
