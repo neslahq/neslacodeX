@@ -184,11 +184,11 @@ def apply_tp(
             input_layouts=Replicate(),
             output_layouts=Replicate(),
         ),
-        "output_layer": prepare_module_input(
-            # input_layouts=(Shard(-1),),
-            input_layouts=(Shard(0),),  # Expect batch-sharded input from last layer
-            desired_input_layouts=(Replicate(),)  # Convert to replicated for ColwiseParallel
-        ),
+        # "output_layer": prepare_module_input(
+        #     # input_layouts=(Shard(-1),),
+        #     input_layouts=(Shard(0),),  # Expect batch-sharded input from last layer
+        #     desired_input_layouts=(Replicate(),)  # Convert to replicated for ColwiseParallel
+        # ),
     }
     
     # First apply the main model components
@@ -199,7 +199,9 @@ def apply_tp(
     )
     
     # Then apply PrepareModuleInput to layers 1+ to convert layouts
-    for i in range(1, len(model.layers)):
+    for i in range(len(model.layers)):
+        if i == 0 and model.embedding_layer is not None:
+            continue
         parallelize_module(
             module=model.layers[i],
             device_mesh=tp_mesh,
@@ -217,7 +219,7 @@ def apply_tp(
             device_mesh=tp_mesh,
             parallelize_plan=colwise_parallel(
                 output_layouts=Shard(-1)   # Shard the output feature dimension
-            ) if i < n_layers - 1 else rowwise_parallel(),
+            ) if i < n_layers - 1 or model.output_layer is None else rowwise_parallel(output_layouts=Shard(1)),
         )
     
     # Apply ColwiseParallel to output layer
@@ -226,7 +228,8 @@ def apply_tp(
             module=model.output_layer,
             device_mesh=tp_mesh,
             parallelize_plan=colwise_parallel(
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                input_layouts=Shard(1),
+                output_layouts=Shard(-1),
                 use_local_output=not loss_parallel,
             ),
         )

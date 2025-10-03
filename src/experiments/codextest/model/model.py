@@ -26,10 +26,13 @@ class CodexTest(nn.Module):
             nn.init.normal_(self.output_layer.weight)
 
     def forward(self, x, input_batch=None):
+       
         x = self.embedding_layer(x) if self.embedding_layer else x
         for layer in self.layers:
             if layer is not None:
                 x = self.relu(layer(x)) if self.relu is not None else layer(x)
+
+          
 
         x = self.output_layer(x) if self.output_layer else x
         # loss = None
