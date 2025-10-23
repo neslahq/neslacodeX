@@ -17,6 +17,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 import torchtitan.protocols.train_spec as train_spec_module
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import src  # Import to register codextest model
 from torchtitan.components.checkpoint import CheckpointManager
@@ -98,6 +99,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             enable_cpu_backend=job_config.training.enable_cpu_offload,
             base_folder=job_config.job.dump_folder,
         )
+
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
         self.parallel_dims = parallel_dims = ParallelDims(
@@ -156,6 +158,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # set the model args from training job configs
         model_args.update_from_config(job_config)
         self.model_args = model_args
+
+        # byte size of one token’s hidden representation
+        hidden_bytes = self.model_args.n_embd * 2
+
+        # create global buffer for deepep
+        dist_utils.get_buffer(hidden_bytes)
 
         logger.info(
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
@@ -641,6 +649,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.checkpointer.close()
         if self.metrics_processor:
             self.metrics_processor.close()
+
 
 def main():
     init_logger()

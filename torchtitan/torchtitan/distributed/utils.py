@@ -284,6 +284,45 @@ def init_distributed(
     )
 
 
+from deep_ep import Buffer, EventOverlap
+
+# Communication buffer (will allocate at runtime)
+_buffer: Optional[Buffer] = None
+
+# Set the number of SMs to use
+# NOTES: this is a static variable
+Buffer.set_num_sms(24)
+
+
+def get_buffer(hidden_bytes: int) -> Buffer:
+    global _buffer
+
+    group = torch.distributed.group.WORLD
+
+    # NOTES: you may also replace `get_*_config` with your auto-tuned results via all the tests
+    num_nvl_bytes, num_rdma_bytes = 0, 0
+    for config in (
+        Buffer.get_dispatch_config(group.size()),
+        Buffer.get_combine_config(group.size()),
+    ):
+        num_nvl_bytes = max(
+            config.get_nvl_buffer_size_hint(hidden_bytes, group.size()), num_nvl_bytes
+        )
+        num_rdma_bytes = max(
+            config.get_rdma_buffer_size_hint(hidden_bytes, group.size()), num_rdma_bytes
+        )
+
+    # Allocate a buffer if not existed or not enough buffer size
+    if (
+        _buffer is None
+        or _buffer.group != group
+        or _buffer.num_nvl_bytes < num_nvl_bytes
+        or _buffer.num_rdma_bytes < num_rdma_bytes
+    ):
+        _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes)
+    return _buffer
+
+
 def set_pg_timeouts(timeout, world_mesh):
     """
     Sets the timeout for all PGs in the provided mesh, and the default (world) group.
@@ -431,9 +470,7 @@ def _clip_grad_norm_with_ep(
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
-        total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-        )
+        total_norm = ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:
