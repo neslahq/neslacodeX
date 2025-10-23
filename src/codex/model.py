@@ -169,7 +169,7 @@ class Attention(nn.Module):
         return self.c_proj(attn)
 
 
-# Adapted from https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/deepseek_v3/model/model.py#L147
+# Adapted from https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/deepseek_v3/model/model.py#L147 to include gated attetion
 class MultiHeadLatentAttention(nn.Module):
     """
     Multi-head attention (MLA) module.
@@ -512,6 +512,72 @@ class Router(nn.Module):
 
         # sum over all tokens and divide by total number of tokens
         return torch.mean(z_loss)
+
+
+class Gate(nn.Module):
+
+    def __init__(self, config):
+        """
+        top_k
+        n_exp
+        n_groups
+        n_limited_groups
+        func -> sigmoid, softmax
+        bias
+        """
+        self.w_gate = nn.Linear(n_embd, n_exp, bias=bias)
+        pass
+
+    def forward(self, x):
+        """
+        x -> B*T, n_embd
+        """
+        gate_scores = self.w_gate(x)  # B*T, n_exp
+
+        if self.func == "sigmoid":
+            gate_scores = nn.sigmoid(gate, dim=-1)
+        elif self.func == "softmax":
+            gate_scores = nn.softmax(gate, dim=-1)
+
+        original_scores = gate_scores
+
+        if self.n_groups > 1:
+            assert self.n_groups % n_exp == 0, "n_groups is indivisible by n_exp"
+            n_group_exp = self.n_groups // n_exp
+            assert (
+                n_group_exp > self.top_k
+            ), "number of experts in a group should be greater than topk"
+
+            gate_scores = gate_scores.view(
+                x.size(0), self.n_groups, -1
+            )  # B*S, n_groups, n_group_exp
+
+            # maximum score for each group
+            if not bias:
+                group_scores = gate_scores.amax(dim=-1)  # B*S, n_groups
+            else:
+                group_scores = gate_scores.topk(2, dim=-1)[0].sum(-1)
+
+            # select top groups i.e maximum number of groups
+            top_group_indices = group_scores.topk(self.n_limited_groups, dim=-1)[
+                1
+            ]  # B*S, n_limited_groups
+
+            # create mask
+            mask = gate_scores.new_ones(x.size(0), n_groups, dtype=bool).scatter_(
+                1, top_group_indices, False
+            )
+
+            gate_scores = gate_scores.masked_fill_(
+                mask.unsqueeze(-1), float("-inf")
+            ).flatten(1)
+
+        topk_indices = torch.topk(gate_scores, self.topk, dim=-1)[1]
+        weights = gate_scores.gather(1, topk_indices)
+        if self.score_func == "sigmoid":
+            weights /= weights.sum(dim=-1, keepdim=True)
+        weights *= self.route_scale
+        return weights.type_as(x), topkindices
 
 
 class MOE(nn.Module):
