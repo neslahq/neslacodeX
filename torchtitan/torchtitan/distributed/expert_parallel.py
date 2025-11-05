@@ -210,7 +210,7 @@ class DeepEP(ParallelStyle):
         return distribute_module(
             module,
             device_mesh,
-            partition_fn=ExpertParallel._partition_fn,
+            partition_fn=self._partition_fn,
             input_fn=self._token_dispatch,
             output_fn=self._token_combine,
         )

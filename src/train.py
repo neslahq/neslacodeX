@@ -159,7 +159,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         model_args.update_from_config(job_config)
         self.model_args = model_args
 
-        # byte size of one token’s hidden representation
+        # byte size of one token’s hidden representation assuming bf16
         hidden_bytes = self.model_args.n_embd * 2
 
         # create global buffer for deepep

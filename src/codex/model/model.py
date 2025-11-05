@@ -293,7 +293,9 @@ class MultiHeadLatentAttention(nn.Module):
         ).contiguous()  # (bsz, seqlen, n_heads, v_head_dim)
 
         # apply gate to output
-        output = nn.sigmoid(g) * output
+        output = (
+            nn.sigmoid(g) * output
+        )  # another implementation used output = output * nn.sigmoid(g) instead, just noting
 
         output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
 
@@ -760,14 +762,20 @@ class MoE(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config, use_moe=False):
+    def __init__(self, config, use_moe=False, linear_attention=True):
         super().__init__()
+        from fla.layers import GatedDeltaNet
 
         self.ln_1 = nn.RMSNorm(config.n_embd)
-        self.attn = Attention(config)
+        if linear_attention:
+            self.attn = GatedDeltaNet(
+                hidden_size=config.n_embd, num_heads=config.n_head, mode="chunk"
+            )
+        else:
+            self.attn = MultiHeadLatentAttention(config)
         self.ln_2 = nn.RMSNorm(config.n_embd)
         if use_moe:
-            self.mlp = MOE(config)
+            self.mlp = MoE(config)
         else:
             self.mlp = MLP(config)
 
@@ -788,9 +796,14 @@ class Codex(nn.Module):
             dict(
                 wte=nn.Embedding(config.vocab_size, config.n_embd),
                 # use moe for every pth layer if use_moe is true
+                # use linear attention for every layer and standard attention for every gth layer
                 h=nn.ModuleList(
                     [
-                        Block(config, use_moe=((i % config.p) == 0 and config.use_moe))
+                        Block(
+                            config,
+                            use_moe=((i % config.p) == 0 and config.use_moe),
+                            linear_attention=(i % config.g) != 0,
+                        )
                         for i in range(config.n_layers)
                     ]
                 ),
