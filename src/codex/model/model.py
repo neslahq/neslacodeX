@@ -16,12 +16,12 @@ MANAGER = MOEManager()
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
-def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
+def precompute_freqs_cis(args) -> torch.Tensor:
     """
     Precomputes frequency-based complex exponential values for rotary positional embeddings.
 
     Args:
-        args (DeepSeekV3ModelArgs): Model arguments containing positional embedding parameters.
+        args: Model arguments containing positional embedding parameters.
 
     Returns:
         torch.Tensor: Precomputed complex exponential values for positional embeddings.
@@ -178,7 +178,7 @@ class MultiHeadLatentAttention(nn.Module):
 
     def __init__(self, model_args):
         super().__init__()
-        self.dim = model_args.dim
+        self.dim = model_args.d_model
         self.n_heads = model_args.n_heads
         self.q_lora_rank = model_args.q_lora_rank
         self.kv_lora_rank = model_args.kv_lora_rank
@@ -214,17 +214,12 @@ class MultiHeadLatentAttention(nn.Module):
             mscale = 0.1 * model_args.mscale * math.log(model_args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        self.use_flex_attn = model_args.use_flex_attn
-        if self.use_flex_attn:
-            self.inner_attention = FlexAttentionWrapper()
-        else:
-            self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
 
     def forward(
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
     ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
@@ -278,14 +273,7 @@ class MultiHeadLatentAttention(nn.Module):
         k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         v = v.transpose(1, 2)  # (bsz, n_heads, seqlen, v_head_dim)
 
-        if self.use_flex_attn:
-            assert isinstance(attention_masks, BlockMask)
-            output = self.inner_attention(
-                q, k, v, block_mask=attention_masks, scale=self.softmax_scale
-            )
-        else:
-            assert attention_masks is None
-            output = self.inner_attention(q, k, v, scale=self.softmax_scale)
+        output = self.sdpa(q, k, v, scale=self.softmax_scale)
 
         # Reshape and project output
         output = output.transpose(
@@ -321,13 +309,13 @@ class MultiHeadLatentAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, config):
+    def __init__(self, model_args):
         super().__init__()
 
-        d_ff = 3 * config.n_embd
+        d_ff = 3 * model_args.d_model
         assert d_ff % 2 == 0
-        self.c_fc = nn.Linear(config.n_embd, d_ff)
-        self.c_proj = nn.Linear(d_ff // 2, config.n_embd)
+        self.c_fc = nn.Linear(model_args.d_model, d_ff)
+        self.c_proj = nn.Linear(d_ff // 2, model_args.d_model)
         self.c_proj.RESIDUAL_SCALE = 1
         self.silu = nn.SiLU()
 
@@ -518,16 +506,24 @@ class Router(nn.Module):
 
 class Gate(nn.Module):
 
-    def __init__(self, config):
+    def __init__(
+        self, dim, num_experts, top_k, score_func, route_norm, route_scale, model_args
+    ):
         """
         top_k
-        n_exp
+        num_experts
         n_groups
         n_limited_groups
         func -> sigmoid, softmax
         bias
         """
-        self.w_gate = nn.Linear(n_embd, n_exp, bias=bias)
+        self.top_k = top_k
+        self.num_experts = num_experts
+        self.func = score_func
+        self.w_gate = nn.Linear(dim, num_experts, bias=False)
+        self.n_groups = model_args.n_expert_groups
+        self.n_limited_groups = model_args.n_limited_groups
+        self.route_scale = route_scale
         pass
 
     def forward(self, x):
@@ -537,28 +533,20 @@ class Gate(nn.Module):
         gate_scores = self.w_gate(x)  # B*T, n_exp
 
         if self.func == "sigmoid":
-            gate_scores = nn.sigmoid(gate, dim=-1)
+            gate_scores = nn.sigmoid(gate_scores, dim=-1)
         elif self.func == "softmax":
-            gate_scores = nn.softmax(gate, dim=-1)
+            gate_scores = nn.softmax(gate_scores, dim=-1)
 
         original_scores = gate_scores
 
         if self.n_groups > 1:
-            assert self.n_groups % n_exp == 0, "n_groups is indivisible by n_exp"
-            n_group_exp = self.n_groups // n_exp
+            assert (
+                self.n_groups % self.num_experts == 0
+            ), "n_groups is indivisible by n_exp"
+            n_group_exp = self.n_groups // self.num_experts
             assert (
                 n_group_exp > self.top_k
             ), "number of experts in a group should be greater than topk"
-
-            gate_scores = gate_scores.view(
-                x.size(0), self.n_groups, -1
-            )  # B*S, n_groups, n_group_exp
-
-            # maximum score for each group
-            if not bias:
-                group_scores = gate_scores.amax(dim=-1)  # B*S, n_groups
-            else:
-                group_scores = gate_scores.topk(2, dim=-1)[0].sum(-1)
 
             # select top groups i.e maximum number of groups
             top_group_indices = group_scores.topk(self.n_limited_groups, dim=-1)[
@@ -566,7 +554,7 @@ class Gate(nn.Module):
             ]  # B*S, n_limited_groups
 
             # create mask
-            mask = gate_scores.new_ones(x.size(0), n_groups, dtype=bool).scatter_(
+            mask = gate_scores.new_ones(x.size(0), self.n_groups, dtype=bool).scatter_(
                 1, top_group_indices, False
             )
 
@@ -574,9 +562,9 @@ class Gate(nn.Module):
                 mask.unsqueeze(-1), float("-inf")
             ).flatten(1)
 
-        topk_indices = torch.topk(gate_scores, self.topk, dim=-1)[1]
+        topk_indices = torch.topk(gate_scores, self.top_k, dim=-1)[1]
         weights = gate_scores.gather(1, topk_indices)
-        if self.score_func == "sigmoid":
+        if self.func == "sigmoid":
             weights /= weights.sum(dim=-1, keepdim=True)
         weights *= self.route_scale
 
@@ -620,7 +608,9 @@ class MOE(nn.Module):
 
 
 class MoE(nn.Module):
-    def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
+    def __init__(
+        self, moe_args: MoEArgs, dim: int, hidden_dim: int, model_args: ModelArgs
+    ):
         super().__init__()
 
         num_experts = moe_args.num_experts
@@ -639,6 +629,7 @@ class MoE(nn.Module):
             score_func=moe_args.score_func,
             route_norm=moe_args.route_norm,
             route_scale=moe_args.route_scale,
+            model_args=model_args,
         )
 
         self.shared_experts = (
@@ -761,68 +752,83 @@ class MoE(nn.Module):
                 )
 
 
-class Block(nn.Module):
-    def __init__(self, config, use_moe=False, linear_attention=True):
+class TransformerBlock(nn.Module):
+    def __init__(self, model_args, use_moe=False, linear_attention=True):
         super().__init__()
         from fla.layers import GatedDeltaNet
 
-        self.ln_1 = nn.RMSNorm(config.n_embd)
+        self.ln_1 = nn.RMSNorm(model_args.d_model)
+        self.linear_attention = linear_attention
         if linear_attention:
             self.attn = GatedDeltaNet(
-                hidden_size=config.n_embd, num_heads=config.n_head, mode="chunk"
+                hidden_size=model_args.d_model,
+                num_heads=model_args.n_heads,
+                mode="chunk",
             )
         else:
-            self.attn = MultiHeadLatentAttention(config)
-        self.ln_2 = nn.RMSNorm(config.n_embd)
+            self.attn = MultiHeadLatentAttention(model_args)
+        self.ln_2 = nn.RMSNorm(model_args.d_model)
         if use_moe:
-            self.mlp = MoE(config)
+            self.mlp = MoE(
+                model_args.moe_args,
+                model_args.d_model,
+                model_args.moe_inter_dim,
+                model_args,
+            )
         else:
-            self.mlp = MLP(config)
+            self.mlp = MLP(model_args)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, freqs_cis):
+        if self.linear_attention:
+            x = x + self.attn(self.ln_1(x))
+        else:
+            x = x + self.attn(self.ln_1(x), freqs_cis)
         x = x + self.mlp(self.ln_2(x))
         return x
 
 
 class Codex(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, model_args):
         super().__init__()
 
-        self.config = config
+        self.model_args = model_args
 
         self.transformer = nn.ModuleDict(
             dict(
-                wte=nn.Embedding(config.vocab_size, config.n_embd),
+                wte=nn.Embedding(model_args.vocab_size, model_args.d_model),
                 # use moe for every pth layer if use_moe is true
                 # use linear attention for every layer and standard attention for every gth layer
                 h=nn.ModuleList(
                     [
-                        Block(
-                            config,
-                            use_moe=((i % config.p) == 0 and config.use_moe),
-                            linear_attention=(i % config.g) != 0,
+                        TransformerBlock(
+                            model_args,
+                            use_moe=((i % model_args.p) == 0 and model_args.use_moe),
+                            linear_attention=(i % model_args.g) != 0,
                         )
-                        for i in range(config.n_layers)
+                        for i in range(model_args.n_layers)
                     ]
                 ),
-                ln_f=nn.RMSNorm(config.n_embd),
+                ln_f=nn.RMSNorm(model_args.d_model),
             )
         )
 
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
+        self.lm_head = nn.Linear(model_args.d_model, model_args.vocab_size)
 
         self.transformer.wte.weight = self.lm_head.weight
 
-        self.apply(self.__init_weights)
+        self.register_buffer(
+            "freqs_cis", precompute_freqs_cis(model_args), persistent=False
+        )
 
-    def __init_weights(self, module):
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
 
         if isinstance(module, nn.Linear):
             std = 0.02
             if hasattr(module, "RESIDUAL_SCALE"):
-                std *= (2 * self.config.n_layers) ** -0.5
+                std *= (2 * self.model_args.n_layers) ** -0.5
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
@@ -830,71 +836,67 @@ class Codex(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-        elif isinstance(module, MLPExperts):
-            torch.nn.init.normal_(module.c_fc, mean=0.0, std=0.02)
-            torch.nn.init.normal_(module.c_proj, mean=0.0, std=0.02)
-            if module.bias_fc is not None:
-                torch.nn.init.zeros_(module.bias_fc)
-            if module.bias_proj is not None:
-                torch.nn.init.zeros_(module.bias_proj)
+        elif isinstance(module, GroupedExperts):
+            torch.nn.init.normal_(module.w1, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.w2, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.w3, mean=0.0, std=0.02)
 
-    def configure_optimizer(self, device_type=None):
-        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+    # def configure_optimizer(self, device_type=None):
+    #     param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
 
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        non_decay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+    #     decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+    #     non_decay_params = [p for n, p in param_dict.items() if p.dim() < 2]
 
-        optim_groups = [
-            {
-                "params": decay_params,
-                "weight_decay": self.config.optimizer.weight_decay,
-            },
-            {"params": non_decay_params, "weight_decay": 0.0},
-        ]
+    #     optim_groups = [
+    #         {
+    #             "params": decay_params,
+    #             "weight_decay": self.config.optimizer.weight_decay,
+    #         },
+    #         {"params": non_decay_params, "weight_decay": 0.0},
+    #     ]
 
-        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == "cuda"
+    #     fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+    #     use_fused = fused_available and device_type == "cuda"
 
-        optimizer = torch.optim.AdamW(
-            optim_groups,
-            lr=self.config.optimizer.learning_rate,
-            betas=(0.9, 0.95),
-            eps=1e-8,
-            fused=use_fused,
-        )
+    #     optimizer = torch.optim.AdamW(
+    #         optim_groups,
+    #         lr=self.config.optimizer.learning_rate,
+    #         betas=(0.9, 0.95),
+    #         eps=1e-8,
+    #         fused=use_fused,
+    #     )
 
-        return optimizer
+    #     return optimizer
 
-    def forward(self, idx, targets=None):
-        B, T = idx.size()
-        assert (
-            T <= self.config.block_size
-        ), f"Sequence length {T} is longer than the block size {self.config.block_size}"
+    def forward(self, tokens, input_batch=None):
+        B, T = tokens.size()
+        # assert (
+        #     T <= self.config.block_size
+        # ), f"Sequence length {T} is longer than the block size {self.config.block_size}"
 
-        tok_emb = self.transformer.wte(idx)
-        x = tok_emb
+        x = self.transformer.wte(tokens)
 
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, self.freqs_cis)
 
         x = self.transformer.ln_f(x)
 
         logits = self.lm_head(x)
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        # loss = None
+        # if targets is not None:
+        #     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 
-            if self.config.use_moe and self.config.use_aux_loss:
-                loss += self.config.aux_loss_weight * MANAGER.aggregate_aux_loss()
-                MANAGER.reset_aux_loss()
+        #     if self.config.use_moe and self.config.use_aux_loss:
+        #         loss += self.config.aux_loss_weight * MANAGER.aggregate_aux_loss()
+        #         MANAGER.reset_aux_loss()
 
-            if self.config.use_moe and self.config.use_router_z_loss:
-                loss += (
-                    self.config.router_z_loss_weight * MANAGER.aggregate_router_z_loss()
-                )
-                MANAGER.reset_router_z_loss()
+        #     if self.config.use_moe and self.config.use_router_z_loss:
+        #         loss += (
+        #             self.config.router_z_loss_weight * MANAGER.aggregate_router_z_loss()
+        #         )
+        #         MANAGER.reset_router_z_loss()
 
-        return logits, loss
+        return logits
 
 
 class DataloaderLite:

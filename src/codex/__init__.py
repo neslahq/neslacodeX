@@ -7,10 +7,14 @@
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
-from torchtitan.components.tokenizer import build_gpt_tokenizer
+from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.models.llama3.infra.pipeline import pipeline_llama
+from torchtitan.models.deepseek_v3.infra.parallelize_deepseek import (
+    parallelize_deepseek,
+)
 
 # from .infra.parallelize import parallelize_codex
 # from .infra.pipeline import pipeline_codex
@@ -28,14 +32,29 @@ __all__ = [
 
 
 codex_configs = {
-    "small": CodexModelArgs(n_embd=768, n_layers=12, vocab_size=50304),
-    "meduim": CodexModelArgs(
-        n_embd=4096,
-        n_layers=32,
-        vocab_size=50304,
+    "small": CodexModelArgs(
+        vocab_size=2000,
+        d_model=256,
+        inter_dim=1024,
+        moe_inter_dim=256,
+        n_layers=6,
+        n_dense_layers=1,
+        n_heads=16,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=2,
+            top_k=3,
+            score_func="softmax",
+            route_norm=False,
+            score_before_experts=False,
+        ),
+        q_lora_rank=0,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        mscale=0.70,
     ),
-    "large": CodexModelArgs(n_embd=8192, n_layers=80, vocab_size=50304),
-    "xlarge": CodexModelArgs(n_embd=16384, n_layers=126, vocab_size=50304),
 }
 
 
@@ -44,12 +63,12 @@ register_train_spec(
         name="codex",
         model_cls=Codex,
         model_args=codex_configs,
-        # parallelize_fn=parallelize_codex,
-        # pipelining_fn=pipeline_codex,
-        build_optimizers_fn=build_optimizers,
+        parallelize_fn=parallelize_deepseek,
+        pipelining_fn=pipeline_llama,
+        build_optimizers_fn=build_optimizers_with_moe_load_balancing,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
-        build_tokenizer_fn=build_gpt_tokenizer,
+        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
     )
