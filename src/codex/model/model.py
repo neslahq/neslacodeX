@@ -524,31 +524,42 @@ class Gate(nn.Module):
         self.n_groups = model_args.n_expert_groups
         self.n_limited_groups = model_args.n_limited_groups
         self.route_scale = route_scale
-        pass
 
-    def forward(self, x):
+    def forward(self, x, expert_bias=None):
         """
         x -> B*T, n_embd
         """
         gate_scores = self.w_gate(x)  # B*T, n_exp
 
         if self.func == "sigmoid":
-            gate_scores = nn.sigmoid(gate_scores, dim=-1)
+            gate_scores = gate_scores.sigmoid(dim=-1, dtype=torch.float32)
         elif self.func == "softmax":
-            gate_scores = nn.softmax(gate_scores, dim=-1)
+            gate_scores = gate_scores.softmax(dim=-1, dtype=torch.float32)
 
         original_scores = gate_scores
 
+        if expert_bias is not None:
+            gate_scores = gate_scores + expert_bias
+
         if self.n_groups > 1:
             assert (
-                self.n_groups % self.num_experts == 0
-            ), "n_groups is indivisible by n_exp"
-            n_group_exp = self.n_groups // self.num_experts
-            assert (
-                n_group_exp > self.top_k
-            ), "number of experts in a group should be greater than topk"
+                self.num_experts % self.n_groups == 0
+            ), "num_experts is indivisible by n_groups"
+            n_group_exp = self.num_experts // self.n_groups
+            # in deepseek implementation, tokens can choose from up to n_limited_groups groups, so n_group_exp doesn't need to be greater than top_k, but here we n_limited_groups is set to 1 ), so we need to assert that n_group_exp is greater than top_k
+            if self.n_limited_groups == 1:
+                assert (
+                    n_group_exp > self.top_k
+                ), "number of experts in a group should be greater than topk"
 
-            # select top groups i.e maximum number of groups
+            gate_scores = gate_scores.view(x.size(0), self.n_groups, -1)
+
+            if expert_bias is None:
+                group_scores = gate_scores.amax(dim=-1)
+            else:
+                group_scores = gate_scores.topk(2, dim=-1)[0].sum(dim=-1)
+
+            # select top groups i.e maximum number of groups a token can choose from
             top_group_indices = group_scores.topk(self.n_limited_groups, dim=-1)[
                 1
             ]  # B*S, n_limited_groups
@@ -563,20 +574,20 @@ class Gate(nn.Module):
             ).flatten(1)
 
         topk_indices = torch.topk(gate_scores, self.top_k, dim=-1)[1]
-        weights = gate_scores.gather(1, topk_indices)
+        weights = original_scores.gather(1, topk_indices)
         if self.func == "sigmoid":
             weights /= weights.sum(dim=-1, keepdim=True)
         weights *= self.route_scale
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
-            topkindices.view(-1),
+            topk_indices.view(-1),
             bins=self.num_experts,
             min=0,
             max=self.num_experts,
         )
 
-        return weights.type_as(x), topkindices, num_tokens_per_expert
+        return weights.type_as(x), topk_indices, num_tokens_per_expert
 
 
 class MOE(nn.Module):
@@ -672,7 +683,7 @@ class MoE(nn.Module):
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
-        # top_scores and selected_experts_indices shape (bs*slen*top_k,)
+        # top_scores and selected_experts_indices have shape (bs*slen, top_k)
         # num_tokens_per_expert shape (num_experts,)
         (
             top_scores,
@@ -688,36 +699,27 @@ class MoE(nn.Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
-        # num_tokens_per_expert shape (num_experts,)
-        # NOTE: the reason we need to compute num_tokens_per_expert again is:
-        #       1st computation in router is to update self.tokens_per_expert
-        #       which would be the same across all TP ranks.
-        #       2nd computation in reorderer is for the actual routing and experts computation
-        #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
-        #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
+        # NOTE: We do not really need to sort the tokens by experts here since we are using DeepExpertParallel and this uses a different all-to-all implementation that does not require sorting the tokens by experts.
+        # However the tokens on each local rank needs to sorted after all-to-all communication(taken care of by DeepExpertParallel) to be able to use grouped mm.
 
         # shape (bs*slen*top_k, dim)
-        token_indices_experts_sorted = token_indices_experts_sorted.reshape(
-            -1, 1
-        ).expand(-1, dim)
+        token_indices = selected_experts_indices.reshape(-1, 1).expand(-1, dim)
 
         # shape (bs*slen*top_k, dim)
-        routed_input = torch.gather(x, dim=0, index=token_indices_experts_sorted)
+        routed_input = torch.gather(x, dim=0, index=token_indices)
 
         if self.score_before_experts:
             routed_input = (
-                routed_input.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
+                routed_input.to(torch.float32) * top_scores.reshape(-1, 1)
             ).to(x.dtype)
 
         # shape (bs*slen*top_k, dim)
+        # TODO: I'm not sure num_tokens_per_expert is properly calibrated here.
         routed_output = self.experts(routed_input, num_tokens_per_expert)
 
         if not self.score_before_experts:
             routed_output = (
-                routed_output.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
+                routed_output.to(torch.float32) * top_scores.reshape(-1, 1)
             ).to(x.dtype)
 
         # shared expert
@@ -726,9 +728,7 @@ class MoE(nn.Module):
         else:
             out = torch.zeros_like(x)
 
-        out = out.scatter_add(
-            dim=0, index=token_indices_experts_sorted, src=routed_output
-        )
+        out = out.scatter_add(dim=0, index=token_indices, src=routed_output)
         out = out.reshape(bs, slen, dim)
         return out
 

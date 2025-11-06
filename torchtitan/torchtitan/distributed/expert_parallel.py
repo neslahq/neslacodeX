@@ -91,7 +91,7 @@ class TensorParallel(ParallelStyle):
         )
 
 
-class DeepEP(ParallelStyle):
+class DeepExpertParallel(ParallelStyle):
     def __init__(self):
         super().__init__()
 
@@ -241,12 +241,14 @@ class ExpertParallel(ParallelStyle):
             num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
                 num_tokens_per_expert_group
             )
+            # this is the number of tokens each expert gets locally
             input_splits = (
                 num_tokens_per_expert.view(ep_size, -1)
                 .sum(dim=1)
                 .to(torch.device("cpu"), non_blocking=True)
             )
             # NOTE: this would incur a device-to-host sync
+            # this is the number of tokens each expert gets globally
             output_splits = (
                 num_tokens_per_expert_group.view(ep_size, -1)
                 .sum(dim=1)
@@ -256,6 +258,7 @@ class ExpertParallel(ParallelStyle):
             self.output_splits = output_splits.tolist()
 
         # perform all-to-all
+        # all-to-all still needs to happen here even after sorting the tokens by experts because each token can choose from multiple experts
         routed_input = all_to_all_single_autograd(
             routed_input,
             self.output_splits,
