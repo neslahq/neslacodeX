@@ -215,6 +215,24 @@ class MultiHeadLatentAttention(nn.Module):
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
         self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
+    
+    def init_weights(self, init_std: float):
+        linear_list = [
+            self.wkv_a,
+            self.wkv_b,
+        ]
+        if self.q_lora_rank > 0:
+            linear_list.extend([self.wq_a, self.wq_b])
+        else:
+            linear_list.append(self.wq)
+
+        for linear in linear_list:
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+
+        self.kv_norm.reset_parameters()
+        if self.q_lora_rank > 0:
+            self.q_norm.reset_parameters()
 
     def forward(
         self,
@@ -289,24 +307,6 @@ class MultiHeadLatentAttention(nn.Module):
 
         return self.wo(output)  # (bsz, seqlen, dim)
 
-    def init_weights(self, init_std: float):
-        linear_list = [
-            self.wkv_a,
-            self.wkv_b,
-        ]
-        if self.q_lora_rank > 0:
-            linear_list.extend([self.wq_a, self.wq_b])
-        else:
-            linear_list.append(self.wq)
-
-        for linear in linear_list:
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
-
-        self.kv_norm.reset_parameters()
-        if self.q_lora_rank > 0:
-            self.q_norm.reset_parameters()
-
 
 class MLP(nn.Module):
     def __init__(self, model_args):
@@ -319,6 +319,10 @@ class MLP(nn.Module):
         self.c_proj.RESIDUAL_SCALE = 1
         self.silu = nn.SiLU()
 
+    def init_weights(self, init_std, buffer_device=None):
+        nn.init.trunc_normal_(self.c_fc.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal(self.c_proj.weight, mean=0.0, std=init_std)
+
     def forward(self, x):
         """
         swiglu based on flash attention implementation
@@ -326,182 +330,6 @@ class MLP(nn.Module):
         y = self.c_fc(x)
         y, gate = y.chunk(2, dim=-1)
         return self.c_proj(self.silu(y) * gate)
-
-
-class MLPExperts(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-
-        d_ff = 3 * config.n_embd
-        assert d_ff % 2 == 0
-
-        self.config = config
-        self.c_fc = nn.Parameter(torch.empty(config.n_exp, config.n_embd, d_ff))
-        # does this get added as part of the model in the accelerator even when it is not in use?
-        self.bias_fc = (
-            nn.Parameter(torch.empty(config.n_exp, 1, d_ff))
-            if self.config.bias
-            else None
-        )
-        self.c_proj = nn.Parameter(torch.empty(config.n_exp, d_ff // 2, config.n_embd))
-        self.bias_proj = (
-            nn.Parameter(torch.empty(config.n_exp, 1, config.n_embd))
-            if self.config.bias
-            else None
-        )
-        self.silu = nn.SiLU()
-        self.gelu = nn.GELU()
-        self.dropout = nn.Dropout(config.dropout)
-
-    def forward(self, x):
-        x = torch.bmm(x, self.c_fc)
-        if self.config.bias:
-            x = x + self.bias_fc
-        x, gate = x.chunk(2, dim=-1)
-        x = self.silu(x) * gate
-        x = torch.bmm(x, self.c_proj)
-        if self.config.bias:
-            x = x + self.bias_proj
-        x = self.dropout(x)
-        return x
-
-
-class Router(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-
-        self.config = config
-        assert (
-            config.top_k >= 1 and config.top_k <= config.n_exp
-        ), f"top_k must be less than or equal to n_exp"
-
-        self.router = nn.Linear(config.n_embd, config.n_exp, bias=False)
-        self.router_noise = (
-            nn.Linear(config.n_embd, config.n_exp, bias=False)
-            if config.use_router_noise
-            else None
-        )
-
-    def forward(self, x):
-        B, T, _ = x.size()
-        num_tokens = B * T
-
-        router_logits = self.router(x)
-
-        if self.config.use_router_noise:
-            noise_weights = F.softplus(self.router_noise(x))
-            noise = noise_weights * torch.rand_like(noise_weights)
-            router_logits += noise
-
-        if self.config.use_router_z_loss:
-            z_loss = self.compute_router_z_loss(router_logits)
-            MANAGER.add_router_z_loss(z_loss)
-
-        topk_logits, topk_indices = router_logits.topk(
-            self.config.top_k, dim=-1
-        )  # B, T, top_k
-        router_probs = torch.full_like(router_logits, float("-inf"))  # [B, C, n_exp]
-        router_probs.scatter_(-1, topk_indices, topk_logits)
-        router_probs = F.softmax(router_probs, dim=-1)
-
-        if self.config.use_aux_loss:
-            aux_loss = self.compute_aux_loss(router_probs, topk_indices)
-            MANAGER.add_aux_loss(aux_loss)
-
-        # compute expert capacity
-        exp_cap = (
-            (self.config.top_k * B * T) / self.config.n_exp
-        ) * self.config.capacity_factor
-        exp_cap += exp_cap % 2
-        exp_cap = int(exp_cap)
-
-        exp_mask = F.one_hot(
-            topk_indices, num_classes=self.config.n_exp
-        )  # [B, C, K, n_exp]
-        exp_mask = exp_mask.view(
-            num_tokens, self.config.top_k, self.config.n_exp
-        )  # [B * C, K, n_exp]
-        exp_mask = exp_mask.permute(1, 0, 2)  # [K, B * C, n_exp]
-
-        exp_rank = exp_mask.reshape(
-            self.config.top_k * num_tokens, self.config.n_exp
-        )  # [K * B * C, n_exp]
-        exp_rank = (
-            torch.cumsum(exp_rank, dim=0) - 1
-        )  # cumsum of expert selections [K * B * C, n_exp]
-        exp_rank = exp_rank.reshape(self.config.top_k, num_tokens, self.config.n_exp)
-
-        exp_mask *= torch.lt(exp_rank, exp_cap)  # [K, B * C, n_exp]
-        used_cap = torch.sum(exp_mask, dim=(0, 1))
-
-        # matrix storing token position in batch of corresponding expert
-        exp_rank = torch.sum(exp_mask * exp_rank, dim=-1)  # [K, B * C]
-
-        # mask probabilities to only include selected experts
-        router_probs = router_probs.view(num_tokens, self.config.n_exp)[
-            None, :
-        ]  # [1, B * C, n_exp]
-        exp_weights = exp_mask * router_probs  # [K, B * C, n_exp]
-
-        # position of each token within the capacity of the selected expert
-        exp_rank_sc = F.one_hot(
-            exp_rank, num_classes=exp_cap
-        )  # [K, B * C, exp_capacity]
-
-        # weight of selected expert for each token at position the capacity of that expert
-        cb_weight = torch.sum(
-            exp_weights.unsqueeze(3) * exp_rank_sc.unsqueeze(2), dim=0
-        )  # [B * C, n_exp, exp_capacity]
-        sec_mask = cb_weight.bool()  # binary mask of selected experts for each token
-
-        # reshape tokens into batches for each expert, return both weights and batches
-        # [n_exp, exp_capacity, B * C] * [B * C, d] -> [n_exp, exp_capacity, n_embd]
-        x = x.view(num_tokens, self.config.n_embd)
-
-        return used_cap, cb_weight, sec_mask
-
-    def compute_aux_loss(self, expert_probs: torch.Tensor, indices: torch.Tensor):
-        """
-        Computes Switch Transformer auxiliary loss (https://arxiv.org/abs/2101.03961)
-        See equations (4)-(6) on page 7
-        """
-
-        # equation (5): compute ratio of tokens allocated to each expert
-        # total number of tokens is defined as total tokens in batch * k
-        # (k = 1) for the Switch Transformer
-        with torch.no_grad():
-            one_hot_indices = F.one_hot(
-                indices, num_classes=self.config.n_exp
-            )  # [B, T, k, n_exp]
-            one_hot_indices = torch.sum(
-                one_hot_indices.float(), dim=2
-            )  # [B, T, n_exp] (sum over k dimension)
-            tokens_per_expert = torch.mean(one_hot_indices.float(), dim=(0, 1))
-
-        # equation (6): compute ratio of router probability allocated to each expert
-        prob_per_expert = torch.mean(expert_probs.float(), dim=(0, 1))
-
-        # equation (4): take a scaled dot product between prob/token allocation vectors
-        # multiply the result by the number of experts
-        return self.config.n_exp * torch.sum(prob_per_expert * tokens_per_expert)
-
-    def compute_router_z_loss(self, logits: torch.Tensor):
-        """
-        Computes ST-MoE router z loss (https://arxiv.org/abs/2202.08906)
-        See equation (5) on page 7
-        """
-
-        # exponentiate logits, sum logits of each expert, take log, and square
-        # code below is the same as:
-        # > z_loss = torch.exp(logits)
-        # > z_loss = torch.sum(z_loss, dim=-1)
-        # > z_loss = torch.log(z_loss) ** 2.0
-        z_loss = torch.logsumexp(logits, dim=-1) ** 2.0  # [B, T, n_exp]
-
-        # sum over all tokens and divide by total number of tokens
-        return torch.mean(z_loss)
 
 
 class Gate(nn.Module):
@@ -524,6 +352,9 @@ class Gate(nn.Module):
         self.n_groups = model_args.n_expert_groups
         self.n_limited_groups = model_args.n_limited_groups
         self.route_scale = route_scale
+
+    def init_weights(self, init_std: float):
+        nn.init.trunc_normal_(self.w_gate.weight, mean=0.0, std=init_std)
 
     def forward(self, x, expert_bias=None):
         """
@@ -590,34 +421,6 @@ class Gate(nn.Module):
         return weights.type_as(x), topk_indices, num_tokens_per_expert
 
 
-class MOE(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-
-        self.config = config
-        self.router = Gate(config)
-
-        self.experts = MLPExperts(config)
-
-    def forward(self, x):
-        B, T, n_embd = x.size()
-        num_tokens = B * T
-
-        used_capacity, exp_weight, exp_mask = self.router(x)
-
-        x = x.view(num_tokens, n_embd)
-        exp_batches = exp_mask.permute(1, 2, 0).type_as(x) @ x
-
-        exp_out = self.experts(exp_batches)
-
-        exp_weight = exp_weight.view(num_tokens, -1)
-        exp_out = exp_out.view(-1, self.config.n_embd)
-        output = exp_weight @ exp_out
-        output = output.view(B, T, self.config.n_embd)
-        return output
-
-
 class MoE(nn.Module):
     def __init__(
         self, moe_args: MoEArgs, dim: int, hidden_dim: int, model_args: ModelArgs
@@ -671,6 +474,25 @@ class MoE(nn.Module):
             torch.zeros(num_experts, dtype=torch.float32),
             persistent=False,
         )
+    
+    def init_weights(
+        self,
+        init_std: float,
+        buffer_device: torch.device,
+    ):
+        self.experts.init_weights(init_std)
+        self.router.init_weights(init_std)
+        if self.shared_experts is not None:
+            self.shared_experts.init_weights(init_std)
+
+        with torch.device(buffer_device):
+            self.tokens_per_expert = torch.zeros(
+                self.experts.num_experts, dtype=torch.float32
+            )
+            if self.load_balance_coeff is not None:
+                self.expert_bias = torch.zeros(
+                    self.experts.num_experts, dtype=torch.float32
+                )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -732,28 +554,9 @@ class MoE(nn.Module):
         out = out.reshape(bs, slen, dim)
         return out
 
-    def init_weights(
-        self,
-        init_std: float,
-        buffer_device: torch.device,
-    ):
-        self.experts.init_weights(init_std)
-        self.router.init_weights(init_std)
-        if self.shared_experts is not None:
-            self.shared_experts.init_weights(init_std)
-
-        with torch.device(buffer_device):
-            self.tokens_per_expert = torch.zeros(
-                self.experts.num_experts, dtype=torch.float32
-            )
-            if self.load_balance_coeff is not None:
-                self.expert_bias = torch.zeros(
-                    self.experts.num_experts, dtype=torch.float32
-                )
-
 
 class TransformerBlock(nn.Module):
-    def __init__(self, model_args, use_moe=False, linear_attention=True):
+    def __init__(self, model_args, layer_id, use_moe=False, linear_attention=True):
         super().__init__()
         from fla.layers import GatedDeltaNet
 
@@ -768,6 +571,7 @@ class TransformerBlock(nn.Module):
         else:
             self.attn = MultiHeadLatentAttention(model_args)
         self.ln_2 = nn.RMSNorm(model_args.d_model)
+        self.moe_enabled = use_moe
         if use_moe:
             self.mlp = MoE(
                 model_args.moe_args,
@@ -777,6 +581,16 @@ class TransformerBlock(nn.Module):
             )
         else:
             self.mlp = MLP(model_args)
+        self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
+        self.layer_id = layer_id
+
+    def init_weights(self, buffer_device):
+        for norm in (self.ln_1, self.ln_2):
+            norm.reset_parameters()
+        if not self.linear_attention:
+            self.attn.init_weights(self.weight_init_std)
+        
+        self.mlp.init_weights(self.weight_init_std, buffer_device)
 
     def forward(self, x, freqs_cis):
         if self.linear_attention:
@@ -803,6 +617,7 @@ class Codex(nn.Module):
                     [
                         TransformerBlock(
                             model_args,
+                            i,
                             use_moe=((i % model_args.p) == 0 and model_args.use_moe),
                             linear_attention=(i % model_args.g) != 0,
                         )
@@ -821,59 +636,32 @@ class Codex(nn.Module):
             "freqs_cis", precompute_freqs_cis(model_args), persistent=False
         )
 
-        self.apply(self._init_weights)
+        # We don't apply init_weights call here since we are using meta init
 
-    def _init_weights(self, module):
+    def init_weights(self, buffer_device):
+        buffer_device = buffer_device or self.freqs_cis.device
+        with torch.device(buffer_device):
+            self.freqs_cis = precompute_freqs_cis(self.model_args)
+        if self.transformer.wte is not None:
+            torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=0.02)
+        for layer in self.transformer.h:
+            if layer is not None:
+                layer.init_weights(buffer_device=buffer_device)
+        if self.transformer.ln_f is not None:
+            self.transformer.ln_f.reset_parameters()
+        final_out_std = self.model_args.d_model**-0.5
+        cutoff_factor = 3
+        if self.lm_head is not None:
+            torch.nn.init.trunc_normal_(
+                self.lm_head.weight,
+                mean=0.0,
+                std=final_out_std,
+                a=-cutoff_factor * final_out_std,
+                b=cutoff_factor * final_out_std,
 
-        if isinstance(module, nn.Linear):
-            std = 0.02
-            if hasattr(module, "RESIDUAL_SCALE"):
-                std *= (2 * self.model_args.n_layers) ** -0.5
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
-        elif isinstance(module, GroupedExperts):
-            torch.nn.init.normal_(module.w1, mean=0.0, std=0.02)
-            torch.nn.init.normal_(module.w2, mean=0.0, std=0.02)
-            torch.nn.init.normal_(module.w3, mean=0.0, std=0.02)
-
-    # def configure_optimizer(self, device_type=None):
-    #     param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-
-    #     decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-    #     non_decay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-
-    #     optim_groups = [
-    #         {
-    #             "params": decay_params,
-    #             "weight_decay": self.config.optimizer.weight_decay,
-    #         },
-    #         {"params": non_decay_params, "weight_decay": 0.0},
-    #     ]
-
-    #     fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
-    #     use_fused = fused_available and device_type == "cuda"
-
-    #     optimizer = torch.optim.AdamW(
-    #         optim_groups,
-    #         lr=self.config.optimizer.learning_rate,
-    #         betas=(0.9, 0.95),
-    #         eps=1e-8,
-    #         fused=use_fused,
-    #     )
-
-    #     return optimizer
 
     def forward(self, tokens, input_batch=None):
         B, T = tokens.size()
-        # assert (
-        #     T <= self.config.block_size
-        # ), f"Sequence length {T} is longer than the block size {self.config.block_size}"
-
         x = self.transformer.wte(tokens)
 
         for block in self.transformer.h:
@@ -882,194 +670,5 @@ class Codex(nn.Module):
         x = self.transformer.ln_f(x)
 
         logits = self.lm_head(x)
-        # loss = None
-        # if targets is not None:
-        #     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-
-        #     if self.config.use_moe and self.config.use_aux_loss:
-        #         loss += self.config.aux_loss_weight * MANAGER.aggregate_aux_loss()
-        #         MANAGER.reset_aux_loss()
-
-        #     if self.config.use_moe and self.config.use_router_z_loss:
-        #         loss += (
-        #             self.config.router_z_loss_weight * MANAGER.aggregate_router_z_loss()
-        #         )
-        #         MANAGER.reset_router_z_loss()
 
         return logits
-
-
-class DataloaderLite:
-
-    def __init__(self, B, T, config, rank, world_size):
-        self.B = B
-        self.T = T
-        self.rank = rank
-        self.world_size = world_size
-        self.current_idx = self.rank * T * B
-
-        file_path = config.path
-
-        with open(
-            os.path.expanduser(file_path),
-            "r",
-        ) as f:
-            text = f.read()
-
-        self.enc = tiktoken.get_encoding("gpt2")
-        self.tokens = torch.tensor(self.enc.encode(text))
-        print(f"Total number of tokens {self.tokens.shape[0]}")
-
-    def next_batch(self):
-        buff = self.tokens[self.current_idx : self.current_idx + self.B * self.T + 1]
-        x = buff[:-1].view(self.B, self.T)
-        y = buff[1:].view(self.B, self.T)
-
-        self.current_idx += self.B * self.T * self.world_size
-
-        if self.current_idx + (self.B * self.T * self.world_size + 1) >= len(
-            self.tokens
-        ):
-            self.current_idx = self.rank * self.T * self.B
-
-        return x, y
-
-
-def get_lr(step, config):
-
-    # linear warmup
-    if step < config.model.optimizer.warmup_steps:
-        return (
-            config.model.optimizer.max_lr
-            * (step + 1)
-            / config.model.optimizer.warmup_steps
-        )
-
-    if step > config.train.max_steps:
-        return config.model.optimizer.min_lr
-
-    # cosine decay
-    # normalize decay ratio to 0-1
-    decay_ratio = (step - config.model.optimizer.warmup_steps) / (
-        config.train.max_steps - config.model.optimizer.warmup_steps
-    )
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return config.model.optimizer.min_lr + coeff * (
-        config.model.optimizer.max_lr - config.model.optimizer.min_lr
-    )
-
-
-def train(config, device="cpu", world_size=1, rank=0, local_rank=0, ddp=False):
-
-    dataloader = DataloaderLite(8, 1024, config.data, rank, world_size)
-    B, T = dataloader.B, dataloader.T
-    total_batch_size = config.train.total_batch_size
-
-    assert (
-        total_batch_size % (B * T * world_size) == 0
-    ), "total_batch_size must be divisible by the batch size x sequence length"
-
-    gradient_accumulation_steps = total_batch_size // (B * T * world_size)
-
-    model = Codex(config.model)
-    model.to(device)
-
-    if device == "cuda":
-        model = torch.compile(model)
-
-    if ddp:
-        model = DDP(model, device_ids=[local_rank])
-
-    raw_model = model.module if ddp else model
-
-    optimizer = raw_model.configure_optimizer(device)
-
-    scaler = torch.amp.GradScaler()
-
-    for epoch in range(config.train.epochs):
-
-        for step in range(config.train.max_steps):
-            t0 = time.time()
-            optimizer.zero_grad()
-            loss_accum = 0.0
-            for micro_step in range(gradient_accumulation_steps):
-                x, y = dataloader.next_batch()
-                x, y = x.to(device), y.to(device)
-                # Autocast increases computation on the device because it adds dtype conversion operations that wouldn't exist otherwise. But the is little compared to the increase in flops and speed of loading data it provides.
-                with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    logits, loss = model(x, y)
-                    loss = loss / gradient_accumulation_steps
-                    loss_accum += loss.detach()
-                # we don't want ddp to sync gradients every micro_step
-                if ddp:
-                    model.require_backward_grad_sync = (
-                        micro_step == gradient_accumulation_steps - 1
-                    )
-                scaler.scale(loss).backward()
-            if ddp:
-                # get loss_accum from all processes and average them, so we print the average loss for all processes and not just for rank 0
-                dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            lr = get_lr(step, config)
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = lr
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-            if device == "cuda":
-                torch.cuda.synchronize()
-            if device == "mps":
-                torch.mps.synchronize()
-            t1 = time.time()
-            dt = (t1 - t0) * 1000
-            toks_sec = (B * T * gradient_accumulation_steps * world_size) / (t1 - t0)
-            if rank == 0:
-                print(
-                    f"Epoch {epoch}: step: {step}, lr: {lr}, loss: {loss_accum.item()}, time: {dt}ms, toks/sec: {toks_sec}, norm: {norm}"
-                )
-
-    if ddp:
-        dist.destroy_process_group()
-
-
-@hydra.main(config_path="src/codex/config", config_name="config.yaml")
-def main(config):
-
-    ddp = int(os.environ.get("RANK", -1)) != -1
-    print(f"DDP: {ddp}")
-    if ddp:
-        assert torch.cuda.is_available(), "For ddp training, cuda is required"
-        dist.init_process_group(backend="nccl")
-        rank = int(os.environ.get("RANK"))
-        local_rank = int(os.environ.get("LOCAL_RANK"))
-        world_size = int(os.environ.get("WORLD_SIZE"))
-        device = f"cuda:{local_rank}"
-        torch.cuda.set_device(device)
-        master_process = rank == 0
-    else:
-        rank = 0
-        local_rank = 0
-        world_size = 1
-        master_process = True
-        device = "cpu"
-        torch.manual_seed(1337)
-
-        if torch.cuda.is_available():
-            device = "cuda"
-            torch.cuda.manual_seed(1337)
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            device = "mps"
-            torch.mps.manual_seed(1337)
-        print(f"Using device: {device}")
-
-    torch.set_float32_matmul_precision("high")
-    # TODO: Add params to config
-    train(config, device, world_size, rank, local_rank, ddp)
-
-    if master_process:
-        print(f"World size: {world_size}")
-
-
-if __name__ == "__main__":
-    main()
