@@ -205,7 +205,9 @@ class MultiHeadLatentAttention(nn.Module):
             bias=False,
         )
         self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
-        self.softmax_scale = self.qk_head_dim**-0.5
+
+        # softmax scale for mup
+        self.softmax_scale = 1.0 / self.qk_head_dim
 
         # gate parameters for gatted attention
         self.wg = nn.Linear(self.dim, self.n_heads * self.v_head_dim, bias=False)
@@ -215,8 +217,8 @@ class MultiHeadLatentAttention(nn.Module):
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
         self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
-    
-    def init_weights(self, init_std: float):
+
+    def init_weights(self, init_std, mup_multiplier, residual_scale):
         linear_list = [
             self.wkv_a,
             self.wkv_b,
@@ -226,9 +228,19 @@ class MultiHeadLatentAttention(nn.Module):
         else:
             linear_list.append(self.wq)
 
+        mup_scale = mup_multiplier**-0.5
+
+        # since we are using factors of W (lora), and both factors are trained, we split the actual mup scale of W and scale both factors of W symmetrically by the same amount.
+        lora_mup_scale = mup_multiplier**-0.25
+
         for linear in linear_list:
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            nn.init.normal_(linear.weight, mean=0.0, std=init_std * lora_mup_scale)
+        nn.init.normal_(self.wg.weight, mean=0.0, std=init_std * mup_scale)
+
+        # scale the output projection by both the residual scale and the mup scale
+        nn.init.trunc_normal_(
+            self.wo.weight, mean=0.0, std=init_std * residual_scale * mup_scale
+        )
 
         self.kv_norm.reset_parameters()
         if self.q_lora_rank > 0:
@@ -332,6 +344,37 @@ class MLP(nn.Module):
         return self.c_proj(self.silu(y) * gate)
 
 
+class CodexGroupedExperts(GroupedExperts):
+    def __init__(self, dim, hidden_dim, num_experts, use_grouped_mm, model_args):
+        super().__init__(dim, hidden_dim, num_experts, use_grouped_mm)
+
+    def init_weights(self, init_std, mup_multiplier, residual_scale):
+
+        mup_scale = mup_multiplier**-0.5
+        nn.init.trunc_normal_(self.w1, mean=0.0, std=init_std * mup_scale)
+        # w2 is the projection weight, it should be scaled by the mup scale and the residual scale
+        nn.init.trunc_normal_(
+            self.w2, mean=0.0, std=init_std * residual_scale * mup_scale
+        )
+        # w3 is the gate weight, i'm not convinced it should be scaled by the residual scale
+        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std * mup_scale)
+
+
+class CodexFeedForward(FeedForward):
+    def __init__(self, dim, hidden_dim):
+        super().__init__(dim, hidden_dim)
+
+    def init_weights(
+        self, init_std, mup_multiplier, residual_scale, buffer_device=None
+    ):
+        mup_scale = mup_multiplier**-0.5
+        nn.init.trunc_normal_(self.w1, mean=0.0, std=init_std * mup_scale)
+        nn.init.trunc_normal_(
+            self.w2, mean=0.0, std=init_std * residual_scale * mup_scale
+        )
+        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std * mup_scale)
+
+
 class Gate(nn.Module):
 
     def __init__(
@@ -353,8 +396,9 @@ class Gate(nn.Module):
         self.n_limited_groups = model_args.n_limited_groups
         self.route_scale = route_scale
 
-    def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w_gate.weight, mean=0.0, std=init_std)
+    def init_weights(self, init_std: float, mup_multiplier: float):
+        mup_scale = mup_multiplier**-0.5
+        nn.init.trunc_normal_(self.w_gate.weight, mean=0.0, std=init_std * mup_scale)
 
     def forward(self, x, expert_bias=None):
         """
@@ -430,7 +474,7 @@ class MoE(nn.Module):
         num_experts = moe_args.num_experts
         from torchtitan.models.moe import GroupedExperts, FeedForward
 
-        self.experts = GroupedExperts(
+        self.experts = CodexGroupedExperts(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
@@ -447,7 +491,9 @@ class MoE(nn.Module):
         )
 
         self.shared_experts = (
-            FeedForward(dim=dim, hidden_dim=hidden_dim * moe_args.num_shared_experts)
+            CodexFeedForward(
+                dim=dim, hidden_dim=hidden_dim * moe_args.num_shared_experts
+            )
             if moe_args.num_shared_experts > 0
             else None
         )
@@ -474,16 +520,18 @@ class MoE(nn.Module):
             torch.zeros(num_experts, dtype=torch.float32),
             persistent=False,
         )
-    
+
     def init_weights(
         self,
         init_std: float,
+        mup_multiplier: float,
+        residual_scale: float,
         buffer_device: torch.device,
     ):
-        self.experts.init_weights(init_std)
-        self.router.init_weights(init_std)
+        self.experts.init_weights(init_std, mup_multiplier, residual_scale)
+        self.router.init_weights(init_std, mup_multiplier)
         if self.shared_experts is not None:
-            self.shared_experts.init_weights(init_std)
+            self.shared_experts.init_weights(init_std, mup_multiplier, residual_scale)
 
         with torch.device(buffer_device):
             self.tokens_per_expert = torch.zeros(
@@ -580,17 +628,25 @@ class TransformerBlock(nn.Module):
                 model_args,
             )
         else:
-            self.mlp = MLP(model_args)
-        self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
+            self.mlp = CodexFeedForward(model_args.d_model, model_args.inter_dim)
+        # residual scaling from gpt 2
+        self.residual_scale = 1 / (2 * (layer_id + 1)) ** 0.5
+        self.mup_multiplier = model_args.d_model / model_args.mup_base_dim
+        self.init_std = model_args.init_std
+        # self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
     def init_weights(self, buffer_device):
         for norm in (self.ln_1, self.ln_2):
             norm.reset_parameters()
         if not self.linear_attention:
-            self.attn.init_weights(self.weight_init_std)
-        
-        self.mlp.init_weights(self.weight_init_std, buffer_device)
+            self.attn.init_weights(
+                self.init_std, self.mup_multiplier, self.residual_scale
+            )
+
+        self.mlp.init_weights(
+            self.init_std, self.mup_multiplier, self.residual_scale, buffer_device
+        )
 
     def forward(self, x, freqs_cis):
         if self.linear_attention:
@@ -636,6 +692,10 @@ class Codex(nn.Module):
             "freqs_cis", precompute_freqs_cis(model_args), persistent=False
         )
 
+        self.mup_multiplier = model_args.d_model / model_args.mup_base_dim
+        self.mup_input_alpha = model_args.mup_input_alpha
+        self.mup_output_alpha = model_args.mup_output_alpha
+
         # We don't apply init_weights call here since we are using meta init
 
     def init_weights(self, buffer_device):
@@ -643,29 +703,36 @@ class Codex(nn.Module):
         with torch.device(buffer_device):
             self.freqs_cis = precompute_freqs_cis(self.model_args)
         if self.transformer.wte is not None:
-            torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=0.02)
+            nn.init.normal_(
+                self.transformer.wte.weight, mean=0.0, std=self.model_args.init_std
+            )
         for layer in self.transformer.h:
             if layer is not None:
                 layer.init_weights(buffer_device=buffer_device)
         if self.transformer.ln_f is not None:
             self.transformer.ln_f.reset_parameters()
-        final_out_std = self.model_args.d_model**-0.5
-        cutoff_factor = 3
-        if self.lm_head is not None:
-            torch.nn.init.trunc_normal_(
-                self.lm_head.weight,
-                mean=0.0,
-                std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
-
+        # TODO: confirm if this is correct, also we are using tied weights
+        # final_out_std = self.model_args.d_model**-0.5
+        # cutoff_factor = 3
+        # if self.lm_head is not None:
+        #     nn.init.trunc_normal_(
+        #         self.lm_head.weight,
+        #         mean=0.0,
+        #         std=final_out_std,
+        #         a=-cutoff_factor * final_out_std,
+        #         b=cutoff_factor * final_out_std,
+        #     )
 
     def forward(self, tokens, input_batch=None):
         B, T = tokens.size()
         x = self.transformer.wte(tokens)
 
+        x *= self.mup_input_alpha
+
         for block in self.transformer.h:
             x = block(x, self.freqs_cis)
+
+        x *= self.mup_output_alpha / self.mup_multiplier
 
         x = self.transformer.ln_f(x)
 

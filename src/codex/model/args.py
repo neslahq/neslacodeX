@@ -48,6 +48,8 @@ class CodexModelArgs(BaseModelArgs):
         moe_args (MoEArgs): Arguments for the MoE layer.
         moe_inter_dim (int): Dimension of the intermediate layer for the MoE layer.
         inter_dim (int): Dimension of the intermediate layer for the feedforward layer.
+        mup_base_dim (int): base model dimension for MUP.
+        init_std (float): Standard deviation for the weight initialization.
     """
 
     max_batch_size: int = 8
@@ -61,6 +63,12 @@ class CodexModelArgs(BaseModelArgs):
     n_dense_layers: int = 1
     n_heads: int = 16
     norm_eps: float = 1e-5  # eps used for RMSNorm
+    init_std: float = 0.02
+
+    # MUP
+    mup_base_dim: int = 256
+    mup_input_alpha: float = 1.0
+    mup_output_alpha: float = 1.0
 
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)
