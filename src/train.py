@@ -297,6 +297,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.optimizers = self.train_spec.build_optimizers_fn(
             self.model_parts, job_config.optimizer, parallel_dims, self.ft_manager
         )
+
+        job_config.lr_scheduler.lr_scale *= 1 / (
+            self.model_args.d_model / self.model_args.mup_base_dim
+        )
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
             self.optimizers, job_config.lr_scheduler, job_config.training.steps
         )

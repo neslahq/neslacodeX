@@ -128,6 +128,7 @@ def build_lr_schedulers(
     stable_steps = training_steps + 1 - warmup_steps - decay_steps
     lr_decay_type = lr_scheduler_config.decay_type
     min_lr_factor = lr_scheduler_config.min_lr_factor
+    lr_scale = lr_scheduler_config.lr_scale
 
     def linear_warmup_stable_decay(
         current_step: int,
@@ -136,6 +137,7 @@ def build_lr_schedulers(
         decay_steps: int,
         lr_decay_type: str,
         min_lr_factor: float,
+        lr_scale: float,
     ):
         """
         Computes linear warmup followed by stable learning rate for a while,
@@ -176,7 +178,10 @@ def build_lr_schedulers(
                 curr_adjustment = 1 - math.sqrt(progress)
             elif lr_decay_type == "cosine":
                 curr_adjustment = 0.5 * (1.0 + math.cos(math.pi * progress))
-            curr_adjustment = min_lr_factor + (1 - min_lr_factor) * curr_adjustment
+            curr_adjustment = (
+                min_lr_factor + (1 - min_lr_factor) * curr_adjustment * lr_scale
+            )
+
         return curr_adjustment
 
     lr_lambda = functools.partial(
@@ -186,5 +191,6 @@ def build_lr_schedulers(
         decay_steps=decay_steps,
         lr_decay_type=lr_decay_type,
         min_lr_factor=min_lr_factor,
+        lr_scale=lr_scale,
     )
     return LRSchedulersContainer(optimizers, lr_lambda)

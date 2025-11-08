@@ -170,6 +170,9 @@ class LRScheduler:
     to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.min_lr_factor`.
     """
 
+    lr_scale: float = 1.0
+    """LR scaling factor to use"""
+
 
 @dataclass
 class Training:
