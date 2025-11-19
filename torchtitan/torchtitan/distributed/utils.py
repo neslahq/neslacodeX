@@ -9,6 +9,7 @@ import math
 import os
 from collections.abc import Generator, Iterable
 from datetime import timedelta
+from typing import Optional
 
 import torch
 import torch.distributed._functional_collectives as funcol

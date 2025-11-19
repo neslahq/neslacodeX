@@ -10,9 +10,7 @@ import math
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchtune.modules import RotaryPositionalEmbeddings
-from .utils import MOEManager
-
-MANAGER = MOEManager()
+from torchtitan.models.moe import GroupedExperts, FeedForward, MoEArgs
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -467,12 +465,11 @@ class Gate(nn.Module):
 
 class MoE(nn.Module):
     def __init__(
-        self, moe_args: MoEArgs, dim: int, hidden_dim: int, model_args: ModelArgs
+        self, moe_args: MoEArgs, dim: int, hidden_dim: int, model_args
     ):
         super().__init__()
 
         num_experts = moe_args.num_experts
-        from torchtitan.models.moe import GroupedExperts, FeedForward
 
         self.experts = CodexGroupedExperts(
             dim=dim,
