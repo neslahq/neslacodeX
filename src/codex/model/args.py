@@ -17,6 +17,7 @@ from torchtitan.models.moe import MoEArgs
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
+
 @dataclass
 class CodexModelArgs(BaseModelArgs):
     """
@@ -66,6 +67,7 @@ class CodexModelArgs(BaseModelArgs):
     init_std: float = 0.02
 
     # MUP
+    use_mup: bool = False
     mup_base_dim: int = 256
     mup_input_alpha: float = 1.0
     mup_output_alpha: float = 1.0

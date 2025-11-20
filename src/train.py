@@ -167,7 +167,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 # Fallback to property if exposed
                 elif hasattr(self.tokenizer, "vocab_size"):
                     tokenizer_vocab = int(getattr(self.tokenizer, "vocab_size"))  # type: ignore[arg-type]
-                if tokenizer_vocab is not None and getattr(model_args, "vocab_size", None) != tokenizer_vocab:
+                if (
+                    tokenizer_vocab is not None
+                    and getattr(model_args, "vocab_size", None) != tokenizer_vocab
+                ):
                     logger.info(
                         f"Adjusting model vocab_size from {getattr(model_args, 'vocab_size', 'unset')} "
                         f"to tokenizer vocab_size {tokenizer_vocab}"
@@ -175,6 +178,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     model_args.vocab_size = tokenizer_vocab
             except Exception as ex:
                 logger.warning(f"Could not align vocab_size with tokenizer: {ex}")
+        if model_args.use_mup and job_config.training.log_activations:
+            self.model_args.d_model = (
+                self.model_args.mup_base_dim * job_config.model.model_width_multiplier
+            )
+            logger.info(
+                f"Using MUP with model width multiplier {job_config.model.model_width_multiplier}"
+            )
+            logger.info(f"Using MUP with model width {self.model_args.d_model}")
         self.model_args = model_args
 
         # byte size of one token’s hidden representation assuming bf16
@@ -188,6 +199,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         with torch.device("meta"):
             model = self.train_spec.model_cls(model_args)
+            # register model hooks for activation logging here if enabled
+            if self.job_config.training.log_activations:
+                # attn and mlp activation caches are of shape (n_steps, n_layers)
+                # embedding and output activation caches are of shape (n_steps)
+                # we store the mean activation value for each layer
+                # we put the caches on the same device as the model to avoid data transfer overhead
+                s = self.job_config.training.steps
+                n = self.model_args.n_layers
+                self.activation_cache = {
+                    "embedding": torch.zeros((s,), device=self.device),
+                    "attention": torch.zeros((s, n), device=self.device),
+                    "mlp": torch.zeros((s, n), device=self.device),
+                    "output": torch.zeros((s,), device=self.device),
+                }
+                self.register_model_hooks(model)
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -407,6 +433,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"total steps {job_config.training.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
+
+    def register_model_hooks(self, model: torch.nn.Module):
+        hooked_modules = ["attn", "mlp", "tok_embeddings", "output"]
+
+        def hook_wrapper(
+            module_name: str, step: int, activation_cache: dict[str, torch.Tensor]
+        ):
+            def hook_fn(module, input, output):
+                _, layer_idx, layer_name = (
+                    module_name.split(".")
+                    if "." in module_name
+                    else (module_name, 0, module_name)
+                )
+                if layer_name == "tok_embeddings":
+                    activation_cache["embedding"][step] = output.abs().mean()
+                elif layer_name == "attn":
+                    activation_cache["attention"][step, layer_idx] = output.abs().mean()
+                elif layer_name == "mlp":
+                    activation_cache["mlp"][step, layer_idx] = output.abs().mean()
+                elif layer_name == "output":
+                    activation_cache["output"][step] = output.abs().mean()
+
+            return hook_fn
+
+        for name, module in model.named_modules():
+            if any(module_name in name for module_name in hooked_modules):
+                module.register_forward_hook(
+                    hook_wrapper(name, self.step, self.activation_cache)
+                )
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -654,6 +709,31 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             logger.info("Sleeping 2 seconds for other ranks to complete")
             time.sleep(2)
 
+        if self.job_config.training.log_activations:
+            self.metrics_processor.log(
+                {
+                    "embedding_activation": self.activation_cache["embedding"]
+                    .detach()
+                    .cpu()
+                    .tolist(),
+                    "attention_activation": self.activation_cache["attention"]
+                    .detach()
+                    .cpu()
+                    .mean(dim=1)
+                    .tolist(),
+                    "mlp_activation": self.activation_cache["mlp"]
+                    .detach()
+                    .cpu()
+                    .mean(dim=1)
+                    .tolist(),
+                    "output_activation": self.activation_cache["output"]
+                    .detach()
+                    .cpu()
+                    .tolist(),
+                    "model_width": self.model_args.d_model,
+                }
+            )
+
         logger.info("Training completed")
 
     def should_continue_training(self) -> bool:
@@ -680,19 +760,22 @@ def main():
     trainer: Optional[Trainer] = None
 
     try:
-        trainer = Trainer(config)
+        for i in range(1, config.training.mup_runs + 1):
+            config.model.model_width_multiplier = i
+            logger.info(f"Running MUP with model width multiplier {i}")
+            trainer = Trainer(config)
 
-        if config.checkpoint.create_seed_checkpoint:
-            assert (
-                int(os.environ["WORLD_SIZE"]) == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding."
-            assert (
-                config.checkpoint.enable
-            ), "Must enable checkpointing when creating a seed checkpoint."
-            trainer.checkpointer.save(curr_step=0, last_step=True)
-            logger.info("Created seed checkpoint")
-        else:
-            trainer.train()
+            if config.checkpoint.create_seed_checkpoint:
+                assert (
+                    int(os.environ["WORLD_SIZE"]) == 1
+                ), "Must create seed checkpoint using a single device, to disable sharding."
+                assert (
+                    config.checkpoint.enable
+                ), "Must enable checkpointing when creating a seed checkpoint."
+                trainer.checkpointer.save(curr_step=0, last_step=True)
+                logger.info("Created seed checkpoint")
+            else:
+                trainer.train()
     except Exception:
         if trainer:
             trainer.close()

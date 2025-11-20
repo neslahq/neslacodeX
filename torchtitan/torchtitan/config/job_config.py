@@ -103,6 +103,9 @@ class Model:
     converters have been applied.
     """
 
+    model_width_multiplier: int = 1
+    """Model width multiplier for MUP"""
+
 
 @dataclass
 class Optimizer:
@@ -244,6 +247,12 @@ class Training:
 
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
+
+    log_activations: bool = False
+    """Whether to log activations of the model"""
+
+    mup_runs: int = 1
+    """Number of MUP runs to run"""
 
 
 @dataclass

@@ -10,8 +10,7 @@ profile_freq = 100
 
 [metrics]
 log_freq = 10
-enable_tensorboard = true
-save_tb_folder = "tb"
+enable_wandb = true
 
 [model]
 name = "codex"
@@ -20,6 +19,7 @@ hf_assets_path = "./assets/hf/Llama-3.1-8B"
 converters = []
 tokenizer_name = "gpt2"
 tokenizer_path = ""
+model_width_multiplier = 1
 
 [optimizer]
 name = "AdamW"
@@ -33,9 +33,11 @@ warmup_steps = 200  # lr scheduler warm up
 local_batch_size = 32
 seq_len = 1024
 max_norm = 1.0  # grad norm clipping
-steps = 2000
+steps = 10
 dataset = "c4_test"
 dataset_path = "torchtitan/tests/assets/c4_test"
+log_activations = true
+mup_runs = 5
 
 [parallelism]
 data_parallel_replicate_degree = 1
