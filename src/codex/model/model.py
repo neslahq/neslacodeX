@@ -311,7 +311,9 @@ class MultiHeadLatentAttention(nn.Module):
         ).contiguous()  # (bsz, seqlen, n_heads, v_head_dim)
 
         # apply gate to output
-        output = torch.sigmoid(g) * output  # another implementation used output = output * torch.sigmoid(g) instead, just noting
+        output = (
+            torch.sigmoid(g) * output
+        )  # another implementation used output = output * torch.sigmoid(g) instead, just noting
 
         output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
 
@@ -465,9 +467,7 @@ class Gate(nn.Module):
 
 
 class MoE(nn.Module):
-    def __init__(
-        self, moe_args: MoEArgs, dim: int, hidden_dim: int, model_args
-    ):
+    def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int, model_args):
         super().__init__()
 
         num_experts = moe_args.num_experts
@@ -641,7 +641,7 @@ class TransformerBlock(nn.Module):
             self.attn.init_weights(
                 self.init_std, self.mup_multiplier, self.residual_scale
             )
-        
+
         if self.moe_enabled:
             self.moe.init_weights(
                 self.init_std, self.mup_multiplier, self.residual_scale, buffer_device
@@ -660,10 +660,10 @@ class TransformerBlock(nn.Module):
         if isinstance(attn_out, tuple):
             attn_out = attn_out[0]
         x = x + attn_out
-        
+
         if self.moe_enabled:
             x = x + self.moe(self.ln_2(x))
-        else:   
+        else:
             x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -672,6 +672,8 @@ class Codex(nn.Module):
 
     def __init__(self, model_args):
         super().__init__()
+
+        model_args.inter_dim = model_args.d_model * 4
 
         self.model_args = model_args
 
@@ -683,15 +685,18 @@ class Codex(nn.Module):
 
         self.layers = nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(model_args, layer_id, use_moe=((layer_id % model_args.p) == 0 and model_args.use_moe), linear_attention=(layer_id % model_args.g) != 0)
-        
+            self.layers[str(layer_id)] = TransformerBlock(
+                model_args,
+                layer_id,
+                use_moe=((layer_id % model_args.p) == 0 and model_args.use_moe),
+                linear_attention=(layer_id % model_args.g) != 0,
+            )
+
         self.norm = nn.RMSNorm(model_args.d_model)
 
         self.output = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False)
 
         self.tok_embeddings.weight = self.output.weight
-
-
 
         # self.transformer = nn.ModuleDict(
         #     dict(
@@ -716,8 +721,6 @@ class Codex(nn.Module):
         # self.lm_head = nn.Linear(model_args.d_model, model_args.vocab_size)
 
         # self.transformer.wte.weight = self.lm_head.weight
-
-        
 
         self.mup_multiplier = model_args.d_model / model_args.mup_base_dim
         self.mup_input_alpha = model_args.mup_input_alpha
