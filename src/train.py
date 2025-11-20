@@ -157,6 +157,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
         model_args.update_from_config(job_config)
+        # Ensure vocab_size matches the tokenizer to avoid out-of-range embedding indices
+        if self.tokenizer is not None:
+            try:
+                tokenizer_vocab = None
+                # Prefer explicit getter if available
+                if hasattr(self.tokenizer, "get_vocab_size"):
+                    tokenizer_vocab = int(self.tokenizer.get_vocab_size())  # type: ignore[arg-type]
+                # Fallback to property if exposed
+                elif hasattr(self.tokenizer, "vocab_size"):
+                    tokenizer_vocab = int(getattr(self.tokenizer, "vocab_size"))  # type: ignore[arg-type]
+                if tokenizer_vocab is not None and getattr(model_args, "vocab_size", None) != tokenizer_vocab:
+                    logger.info(
+                        f"Adjusting model vocab_size from {getattr(model_args, 'vocab_size', 'unset')} "
+                        f"to tokenizer vocab_size {tokenizer_vocab}"
+                    )
+                    model_args.vocab_size = tokenizer_vocab
+            except Exception as ex:
+                logger.warning(f"Could not align vocab_size with tokenizer: {ex}")
         self.model_args = model_args
 
         # byte size of one token’s hidden representation assuming bf16

@@ -11,6 +11,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchtune.modules import RotaryPositionalEmbeddings
 from torchtitan.models.moe import GroupedExperts, FeedForward, MoEArgs
+from torchtitan.models.attention import build_attention
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -295,7 +296,8 @@ class MultiHeadLatentAttention(nn.Module):
         )  # (bsz, seqlen, n_heads, qk_head_dim)
 
         # condition gate parameters with input from the residual stream
-        g = self.wg(x)  # (bsz, seqlen, n_heads, v_head_dim)
+        g = self.wg(x)  # (bsz, seqlen, n_heads * v_head_dim)
+        g = g.view(bsz, seqlen, self.n_heads, self.v_head_dim)
 
         q = q.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
@@ -309,9 +311,7 @@ class MultiHeadLatentAttention(nn.Module):
         ).contiguous()  # (bsz, seqlen, n_heads, v_head_dim)
 
         # apply gate to output
-        output = (
-            nn.sigmoid(g) * output
-        )  # another implementation used output = output * nn.sigmoid(g) instead, just noting
+        output = torch.sigmoid(g) * output  # another implementation used output = output * torch.sigmoid(g) instead, just noting
 
         output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
 
@@ -331,7 +331,7 @@ class MLP(nn.Module):
 
     def init_weights(self, init_std, buffer_device=None):
         nn.init.trunc_normal_(self.c_fc.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal(self.c_proj.weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.c_proj.weight, mean=0.0, std=init_std)
 
     def forward(self, x):
         """
@@ -343,7 +343,7 @@ class MLP(nn.Module):
 
 
 class CodexGroupedExperts(GroupedExperts):
-    def __init__(self, dim, hidden_dim, num_experts, use_grouped_mm, model_args):
+    def __init__(self, dim, hidden_dim, num_experts, use_grouped_mm):
         super().__init__(dim, hidden_dim, num_experts, use_grouped_mm)
 
     def init_weights(self, init_std, mup_multiplier, residual_scale):
@@ -366,11 +366,11 @@ class CodexFeedForward(FeedForward):
         self, init_std, mup_multiplier, residual_scale, buffer_device=None
     ):
         mup_scale = mup_multiplier**-0.5
-        nn.init.trunc_normal_(self.w1, mean=0.0, std=init_std * mup_scale)
+        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=init_std * mup_scale)
         nn.init.trunc_normal_(
-            self.w2, mean=0.0, std=init_std * residual_scale * mup_scale
+            self.w2.weight, mean=0.0, std=init_std * residual_scale * mup_scale
         )
-        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std * mup_scale)
+        nn.init.trunc_normal_(self.w3.weight, mean=0.0, std=init_std * mup_scale)
 
 
 class Gate(nn.Module):
@@ -386,6 +386,7 @@ class Gate(nn.Module):
         func -> sigmoid, softmax
         bias
         """
+        super().__init__()
         self.top_k = top_k
         self.num_experts = num_experts
         self.func = score_func
@@ -618,7 +619,7 @@ class TransformerBlock(nn.Module):
         self.ln_2 = nn.RMSNorm(model_args.d_model)
         self.moe_enabled = use_moe
         if use_moe:
-            self.mlp = MoE(
+            self.moe = MoE(
                 model_args.moe_args,
                 model_args.d_model,
                 model_args.moe_inter_dim,
@@ -640,17 +641,30 @@ class TransformerBlock(nn.Module):
             self.attn.init_weights(
                 self.init_std, self.mup_multiplier, self.residual_scale
             )
-
-        self.mlp.init_weights(
-            self.init_std, self.mup_multiplier, self.residual_scale, buffer_device
-        )
+        
+        if self.moe_enabled:
+            self.moe.init_weights(
+                self.init_std, self.mup_multiplier, self.residual_scale, buffer_device
+            )
+        else:
+            self.mlp.init_weights(
+                self.init_std, self.mup_multiplier, self.residual_scale, buffer_device
+            )
 
     def forward(self, x, freqs_cis):
+        attn_in = self.ln_1(x)
         if self.linear_attention:
-            x = x + self.attn(self.ln_1(x))
+            attn_out = self.attn(attn_in)
         else:
-            x = x + self.attn(self.ln_1(x), freqs_cis)
-        x = x + self.mlp(self.ln_2(x))
+            attn_out = self.attn(attn_in, freqs_cis)
+        if isinstance(attn_out, tuple):
+            attn_out = attn_out[0]
+        x = x + attn_out
+        
+        if self.moe_enabled:
+            x = x + self.moe(self.ln_2(x))
+        else:   
+            x = x + self.mlp(self.ln_2(x))
         return x
 
 
@@ -661,33 +675,49 @@ class Codex(nn.Module):
 
         self.model_args = model_args
 
-        self.transformer = nn.ModuleDict(
-            dict(
-                wte=nn.Embedding(model_args.vocab_size, model_args.d_model),
-                # use moe for every pth layer if use_moe is true
-                # use linear attention for every layer and standard attention for every gth layer
-                h=nn.ModuleList(
-                    [
-                        TransformerBlock(
-                            model_args,
-                            i,
-                            use_moe=((i % model_args.p) == 0 and model_args.use_moe),
-                            linear_attention=(i % model_args.g) != 0,
-                        )
-                        for i in range(model_args.n_layers)
-                    ]
-                ),
-                ln_f=nn.RMSNorm(model_args.d_model),
-            )
-        )
-
-        self.lm_head = nn.Linear(model_args.d_model, model_args.vocab_size)
-
-        self.transformer.wte.weight = self.lm_head.weight
+        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.d_model)
 
         self.register_buffer(
             "freqs_cis", precompute_freqs_cis(model_args), persistent=False
         )
+
+        self.layers = nn.ModuleDict()
+        for layer_id in range(model_args.n_layers):
+            self.layers[str(layer_id)] = TransformerBlock(model_args, layer_id, use_moe=((layer_id % model_args.p) == 0 and model_args.use_moe), linear_attention=(layer_id % model_args.g) != 0)
+        
+        self.norm = nn.RMSNorm(model_args.d_model)
+
+        self.output = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False)
+
+        self.tok_embeddings.weight = self.output.weight
+
+
+
+        # self.transformer = nn.ModuleDict(
+        #     dict(
+        #         wte=nn.Embedding(model_args.vocab_size, model_args.d_model),
+        #         # use moe for every pth layer if use_moe is true
+        #         # use linear attention for every layer and standard attention for every gth layer
+        #         h=nn.ModuleList(
+        #             [
+        #                 TransformerBlock(
+        #                     model_args,
+        #                     i,
+        #                     use_moe=((i % model_args.p) == 0 and model_args.use_moe),
+        #                     linear_attention=(i % model_args.g) != 0,
+        #                 )
+        #                 for i in range(model_args.n_layers)
+        #             ]
+        #         ),
+        #         ln_f=nn.RMSNorm(model_args.d_model),
+        #     )
+        # )
+
+        # self.lm_head = nn.Linear(model_args.d_model, model_args.vocab_size)
+
+        # self.transformer.wte.weight = self.lm_head.weight
+
+        
 
         self.mup_multiplier = model_args.d_model / model_args.mup_base_dim
         self.mup_input_alpha = model_args.mup_input_alpha
@@ -699,15 +729,15 @@ class Codex(nn.Module):
         buffer_device = buffer_device or self.freqs_cis.device
         with torch.device(buffer_device):
             self.freqs_cis = precompute_freqs_cis(self.model_args)
-        if self.transformer.wte is not None:
+        if self.tok_embeddings is not None:
             nn.init.normal_(
-                self.transformer.wte.weight, mean=0.0, std=self.model_args.init_std
+                self.tok_embeddings.weight, mean=0.0, std=self.model_args.init_std
             )
-        for layer in self.transformer.h:
+        for layer in self.layers.values():
             if layer is not None:
                 layer.init_weights(buffer_device=buffer_device)
-        if self.transformer.ln_f is not None:
-            self.transformer.ln_f.reset_parameters()
+        if self.norm is not None:
+            self.norm.reset_parameters()
         # TODO: confirm if this is correct, also we are using tied weights
         # final_out_std = self.model_args.d_model**-0.5
         # cutoff_factor = 3
@@ -722,17 +752,17 @@ class Codex(nn.Module):
 
     def forward(self, tokens, input_batch=None):
         B, T = tokens.size()
-        x = self.transformer.wte(tokens)
+        x = self.tok_embeddings(tokens)
 
         x *= self.mup_input_alpha
 
-        for block in self.transformer.h:
+        for block in self.layers.values():
             x = block(x, self.freqs_cis)
 
         x *= self.mup_output_alpha / self.mup_multiplier
 
-        x = self.transformer.ln_f(x)
+        x = self.norm(x)
 
-        logits = self.lm_head(x)
+        logits = self.output(x)
 
         return logits

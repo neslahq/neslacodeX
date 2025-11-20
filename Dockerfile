@@ -12,6 +12,8 @@ apt-get clean && rm -rf /var/lib/apt/lists/*
 # Install pip for Python 3.11
 RUN wget https://bootstrap.pypa.io/get-pip.py && python3.11 get-pip.py && rm get-pip.py
 
+ENV TORCH_USE_CUDA_DSA=1
+
 # Install PyTorch, Torchvision, Torchaudio with CUDA 12.8 support, and Transformers
 RUN pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.9.* torchvision torchaudio && \
 python3.11 -m pip install transformers==4.34.0

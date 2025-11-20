@@ -92,6 +92,10 @@ class CodexModelArgs(BaseModelArgs):
     beta_slow: int = 1
     mscale: float = 1.0
 
+    p: int = 1
+    g: int = 3
+    use_moe: bool = False
+
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
         if seq_len > self.max_seq_len:
@@ -147,7 +151,7 @@ class CodexModelArgs(BaseModelArgs):
         l, h, q, t = (
             self.n_layers,
             self.n_heads,
-            self.dim // self.n_heads,
+            self.d_model // self.n_heads,
             seq_len,
         )
         # Reasoning behind the factor of 12 for the self-attention part of the formula:
