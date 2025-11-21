@@ -13,6 +13,8 @@ from typing import Any, Generator, Iterable, Optional
 import hydra
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
+import csv
+from pathlib import Path
 
 import torchtitan.protocols.train_spec as train_spec_module
 import sys
@@ -221,6 +223,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     "output": torch.zeros((s,), device=self.device),
                 }
                 self.register_model_hooks(model)
+                # Setup CSV logging for activation means (rank 0 only)
+                self.activation_log_dir = (
+                    Path(self.job_config.job.dump_folder) / "activation_logs"
+                )
+                self.activation_log_file = (
+                    self.activation_log_dir / "mup_activations.csv"
+                )
+                if torch.distributed.get_rank() == 0:
+                    self.activation_log_dir.mkdir(parents=True, exist_ok=True)
+                    if not self.activation_log_file.exists():
+                        with self.activation_log_file.open("w", newline="") as f:
+                            writer = csv.writer(f)
+                            writer.writerow(
+                                [
+                                    "step",
+                                    "model_width",
+                                    "embedding",
+                                    "attention",
+                                    "mlp",
+                                    "output",
+                                ]
+                            )
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -628,24 +652,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             extra_metrics.update(
                 {
                     "embedding_activation": self.activation_cache["embedding"][
-                        self.step-1
+                        self.step - 1
                     ]
                     .detach()
                     .cpu()
                     .tolist(),
                     "attention_activation": self.activation_cache["attention"][
-                        self.step-1
+                        self.step - 1
                     ]
                     .detach()
                     .cpu()
                     .mean()
                     .tolist(),
-                    "mlp_activation": self.activation_cache["mlp"][self.step-1]
+                    "mlp_activation": self.activation_cache["mlp"][self.step - 1]
                     .detach()
                     .cpu()
                     .mean()
                     .tolist(),
-                    "output_activation": self.activation_cache["output"][self.step-1]
+                    "output_activation": self.activation_cache["output"][self.step - 1]
                     .detach()
                     .cpu()
                     .tolist(),
@@ -660,6 +684,32 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             grad_norm.item(),
             extra_metrics=extra_metrics,
         )
+        # Append activation means to CSV (rank 0 only)
+        if (
+            self.job_config.training.log_activations
+            and torch.distributed.get_rank() == 0
+        ):
+            idx = self.step - 1
+            embedding_val = float(
+                self.activation_cache["embedding"][idx].detach().cpu()
+            )
+            attention_val = float(
+                self.activation_cache["attention"][idx].detach().cpu().mean()
+            )
+            mlp_val = float(self.activation_cache["mlp"][idx].detach().cpu().mean())
+            output_val = float(self.activation_cache["output"][idx].detach().cpu())
+            with self.activation_log_file.open("a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(
+                    [
+                        self.step,
+                        self.model_args.d_model,
+                        embedding_val,
+                        attention_val,
+                        mlp_val,
+                        output_val,
+                    ]
+                )
 
     @record
     def train(self):
