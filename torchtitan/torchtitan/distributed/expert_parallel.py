@@ -26,14 +26,21 @@ import torch
 import torch.distributed as dist
 from typing import List, Tuple, Optional, Union
 
-from deep_ep import Buffer, EventOverlap
+try:
+    from deep_ep import Buffer, EventOverlap  # type: ignore
+    _HAS_DEEP_EP = True
+except Exception:
+    Buffer = None  # type: ignore[assignment]
+    EventOverlap = None  # type: ignore[assignment]
+    _HAS_DEEP_EP = False
 
 # Communication buffer (will allocate at runtime)
 _buffer: Optional[Buffer] = None
 
-# Set the number of SMs to use
+# Set the number of SMs to use if DeepEP is available
 # NOTES: this is a static variable
-Buffer.set_num_sms(24)
+if _HAS_DEEP_EP:
+    Buffer.set_num_sms(24)
 
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
@@ -112,6 +119,8 @@ class DeepExpertParallel(ParallelStyle):
         Tuple,
         EventOverlap,
     ]:
+        if not _HAS_DEEP_EP:
+            raise ImportError("deep_ep is required for DeepExpertParallel but is not installed.")
         # NOTES: an optional `previous_event` means a CUDA event captured that you want to make it as a dependency
         # of the dispatch kernel, it may be useful with communication-computation overlap. For more information, please
         # refer to the docs of `Buffer.dispatch`
@@ -191,6 +200,8 @@ class DeepExpertParallel(ParallelStyle):
     def _token_combine(
         x: torch.Tensor, handle: Tuple, previous_event: Optional[EventOverlap] = None
     ) -> Tuple[torch.Tensor, EventOverlap]:
+        if not _HAS_DEEP_EP:
+            raise ImportError("deep_ep is required for DeepExpertParallel but is not installed.")
         global _buffer
 
         # Do MoE combine

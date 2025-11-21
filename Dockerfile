@@ -55,7 +55,7 @@ RUN pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.9.* 
 python3.11 -m pip install transformers==4.34.0
 
 # Add project environment variables
-ENV WANDB_TEAM=nesla-research
+ENV WANDB_TEAM=tinuade
 ENV WANDB_PROJECT=codex-mup-codecheck
 ENV WANDB_RUN_NAME=codex-mup-codecheck
 

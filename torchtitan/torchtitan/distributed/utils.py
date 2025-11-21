@@ -285,14 +285,21 @@ def init_distributed(
     )
 
 
-from deep_ep import Buffer, EventOverlap
+try:
+    from deep_ep import Buffer, EventOverlap  # type: ignore
+    _HAS_DEEP_EP = True
+except Exception:
+    Buffer = None  # type: ignore[assignment]
+    EventOverlap = None  # type: ignore[assignment]
+    _HAS_DEEP_EP = False
 
 # Communication buffer (will allocate at runtime)
 _buffer: Optional[Buffer] = None
 
-# Set the number of SMs to use
+# Set the number of SMs to use if DeepEP is available
 # NOTES: this is a static variable
-Buffer.set_num_sms(24)
+if _HAS_DEEP_EP:
+    Buffer.set_num_sms(24)
 
 
 def get_buffer(hidden_bytes: int) -> Buffer:
@@ -301,6 +308,8 @@ def get_buffer(hidden_bytes: int) -> Buffer:
     group = torch.distributed.group.WORLD
 
     # NOTES: you may also replace `get_*_config` with your auto-tuned results via all the tests
+    if not _HAS_DEEP_EP:
+        raise ImportError("deep_ep is required for get_buffer but is not installed.")
     num_nvl_bytes, num_rdma_bytes = 0, 0
     for config in (
         Buffer.get_dispatch_config(group.size()),

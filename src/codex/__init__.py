@@ -36,9 +36,9 @@ codex_configs = {
     "small": CodexModelArgs(
         vocab_size=512,
         d_model=256,
-        n_layers=6,
+        n_layers=1,
         n_dense_layers=1,
-        n_heads=6,
+        n_heads=1,
         moe_args=MoEArgs(
             num_experts=2,
             num_shared_experts=1,

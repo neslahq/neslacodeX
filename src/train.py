@@ -192,11 +192,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         hidden_bytes = self.model_args.d_model * 2
 
         # create global buffer for deepep
-        dist_utils.get_buffer(hidden_bytes)
+        if world_size > 1:
+            dist_utils.get_buffer(hidden_bytes)
 
         logger.info(
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
         )
+
+        # Initialize trainer states that will be saved in checkpoint.
+        # These attributes must be initialized before checkpoint loading.
+        self.step = 0
+        self.ntokens_seen = 0
+
         with torch.device("meta"):
             model = self.train_spec.model_cls(model_args)
             # register model hooks for activation logging here if enabled
@@ -359,11 +366,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
 
-        # Initialize trainer states that will be saved in checkpoint.
-        # These attributes must be initialized before checkpoint loading.
-        self.step = 0
-        self.ntokens_seen = 0
-
         self.checkpointer = CheckpointManager(
             dataloader=self.dataloader,
             model_parts=self.model_parts,
@@ -446,6 +448,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     if "." in module_name
                     else (module_name, 0, module_name)
                 )
+                layer_idx = int(layer_idx)
+                if isinstance(output, tuple):
+                    output = output[0]
                 if layer_name == "tok_embeddings":
                     activation_cache["embedding"][step] = output.abs().mean()
                 elif layer_name == "attn":
@@ -458,7 +463,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             return hook_fn
 
         for name, module in model.named_modules():
-            if any(module_name in name for module_name in hooked_modules):
+            if any(name.endswith(module_name) for module_name in hooked_modules):
                 module.register_forward_hook(
                     hook_wrapper(name, self.step, self.activation_cache)
                 )
@@ -618,6 +623,36 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+
+        if self.job_config.training.log_activations:
+            extra_metrics.update(
+                {
+                    "embedding_activation": self.activation_cache["embedding"][
+                        self.step-1
+                    ]
+                    .detach()
+                    .cpu()
+                    .tolist(),
+                    "attention_activation": self.activation_cache["attention"][
+                        self.step-1
+                    ]
+                    .detach()
+                    .cpu()
+                    .mean()
+                    .tolist(),
+                    "mlp_activation": self.activation_cache["mlp"][self.step-1]
+                    .detach()
+                    .cpu()
+                    .mean()
+                    .tolist(),
+                    "output_activation": self.activation_cache["output"][self.step-1]
+                    .detach()
+                    .cpu()
+                    .tolist(),
+                    "model_width": self.model_args.d_model,
+                }
+            )
+
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -708,31 +743,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if torch.distributed.get_rank() == 0:
             logger.info("Sleeping 2 seconds for other ranks to complete")
             time.sleep(2)
-
-        if self.job_config.training.log_activations:
-            self.metrics_processor.log(
-                {
-                    "embedding_activation": self.activation_cache["embedding"]
-                    .detach()
-                    .cpu()
-                    .tolist(),
-                    "attention_activation": self.activation_cache["attention"]
-                    .detach()
-                    .cpu()
-                    .mean(dim=1)
-                    .tolist(),
-                    "mlp_activation": self.activation_cache["mlp"]
-                    .detach()
-                    .cpu()
-                    .mean(dim=1)
-                    .tolist(),
-                    "output_activation": self.activation_cache["output"]
-                    .detach()
-                    .cpu()
-                    .tolist(),
-                    "model_width": self.model_args.d_model,
-                }
-            )
 
         logger.info("Training completed")
 
