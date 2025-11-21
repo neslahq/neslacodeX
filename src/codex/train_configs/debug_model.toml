@@ -19,7 +19,6 @@ hf_assets_path = "./assets/hf/Llama-3.1-8B"
 converters = []
 tokenizer_name = "gpt2"
 tokenizer_path = ""
-model_width_multiplier = 1
 
 [optimizer]
 name = "AdamW"

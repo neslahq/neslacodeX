@@ -103,9 +103,6 @@ class Model:
     converters have been applied.
     """
 
-    model_width_multiplier: int = 1
-    """Model width multiplier for MUP"""
-
 
 @dataclass
 class Optimizer:

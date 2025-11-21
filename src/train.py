@@ -180,14 +180,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     model_args.vocab_size = tokenizer_vocab
             except Exception as ex:
                 logger.warning(f"Could not align vocab_size with tokenizer: {ex}")
-        if model_args.use_mup and job_config.training.log_activations:
-            self.model_args.d_model = (
-                self.model_args.mup_base_dim * job_config.model.model_width_multiplier
-            )
-            logger.info(
-                f"Using MUP with model width multiplier {job_config.model.model_width_multiplier}"
-            )
-            logger.info(f"Using MUP with model width {self.model_args.d_model}")
+
         self.model_args = model_args
 
         # byte size of one token’s hidden representation assuming bf16
@@ -820,22 +813,20 @@ def main():
     trainer: Optional[Trainer] = None
 
     try:
-        for i in range(1, config.training.mup_runs + 1):
-            config.model.model_width_multiplier = i
-            logger.info(f"Running MUP with model width multiplier {i}")
-            trainer = Trainer(config)
 
-            if config.checkpoint.create_seed_checkpoint:
-                assert (
-                    int(os.environ["WORLD_SIZE"]) == 1
-                ), "Must create seed checkpoint using a single device, to disable sharding."
-                assert (
-                    config.checkpoint.enable
-                ), "Must enable checkpointing when creating a seed checkpoint."
-                trainer.checkpointer.save(curr_step=0, last_step=True)
-                logger.info("Created seed checkpoint")
-            else:
-                trainer.train()
+        trainer = Trainer(config)
+
+        if config.checkpoint.create_seed_checkpoint:
+            assert (
+                int(os.environ["WORLD_SIZE"]) == 1
+            ), "Must create seed checkpoint using a single device, to disable sharding."
+            assert (
+                config.checkpoint.enable
+            ), "Must enable checkpointing when creating a seed checkpoint."
+            trainer.checkpointer.save(curr_step=0, last_step=True)
+            logger.info("Created seed checkpoint")
+        else:
+            trainer.train()
     except Exception:
         if trainer:
             trainer.close()
