@@ -628,8 +628,12 @@ class TransformerBlock(nn.Module):
         else:
             self.mlp = CodexFeedForward(model_args.d_model, model_args.inter_dim)
         # residual scaling from gpt 2
-        self.residual_scale = 1 / (2 * (layer_id + 1)) ** 0.5
-        self.mup_multiplier = model_args.d_model / model_args.mup_base_dim
+        self.residual_scale = (
+            1 / (2 * (layer_id + 1)) ** 0.5 if model_args.use_residual_scaling else 1.0
+        )
+        self.mup_multiplier = (
+            model_args.d_model / model_args.mup_base_dim if model_args.use_mup else 1.0
+        )
         self.init_std = model_args.init_std
         # self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
@@ -722,9 +726,11 @@ class Codex(nn.Module):
 
         # self.transformer.wte.weight = self.lm_head.weight
 
-        self.mup_multiplier = model_args.d_model / model_args.mup_base_dim
-        self.mup_input_alpha = model_args.mup_input_alpha
-        self.mup_output_alpha = model_args.mup_output_alpha
+        self.mup_multiplier = (
+            model_args.d_model / model_args.mup_base_dim if model_args.use_mup else 1.0
+        )
+        self.mup_input_alpha = model_args.mup_input_alpha if model_args.use_mup else 1.0
+        self.mup_output_alpha = model_args.mup_output_alpha if model_args.use_mup else 1.0
 
         # We don't apply init_weights call here since we are using meta init
 

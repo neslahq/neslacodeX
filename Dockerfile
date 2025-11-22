@@ -15,7 +15,7 @@ RUN wget https://bootstrap.pypa.io/get-pip.py && python3.11 get-pip.py && rm get
 ENV TORCH_USE_CUDA_DSA=1
 
 # Install PyTorch, Torchvision, Torchaudio with CUDA 12.8 support, and Transformers
-RUN pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.9.* torchvision torchaudio && \
+RUN pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.9.* torchvision torchaudio torchao && \
 python3.11 -m pip install transformers==4.34.0
 
 # Install NVSHMEM for DEEPEP
@@ -49,10 +49,6 @@ RUN git clone https://github.com/deepseek-ai/DeepEP.git /opt/DeepEP && \
     cd /opt/DeepEP && \
     python3.11 setup.py install && \
     cd / && rm -rf /opt/DeepEP
-
-# Install PyTorch, Torchvision, Torchaudio with CUDA 12.8 support, and Transformers
-RUN pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.9.* torchvision torchaudio torchao && \
-python3.11 -m pip install transformers==4.34.0
 
 # Add project environment variables
 ENV WANDB_TEAM=tinuade

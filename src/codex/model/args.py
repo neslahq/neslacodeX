@@ -72,6 +72,9 @@ class CodexModelArgs(BaseModelArgs):
     mup_input_alpha: float = 1.0
     mup_output_alpha: float = 1.0
 
+    # residual scaling
+    use_residual_scaling: bool = False
+
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)
     n_expert_groups: int = 1
