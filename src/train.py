@@ -217,11 +217,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 }
                 self.register_model_hooks(model)
                 # Setup CSV logging for activation means (rank 0 only)
+                run = "mup" if self.model_args.use_mup else "sp"
                 self.activation_log_dir = (  
                     Path(self.job_config.job.dump_folder) / "activation_logs"
                 )
                 self.activation_log_file = (
-                    self.activation_log_dir / "mup_activations.csv"
+                    self.activation_log_dir / f"{run}_activations.csv"
                 )
                 if torch.distributed.get_rank() == 0:
                     self.activation_log_dir.mkdir(parents=True, exist_ok=True)

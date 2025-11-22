@@ -763,15 +763,19 @@ class Codex(nn.Module):
         B, T = tokens.size()
         x = self.tok_embeddings(tokens)
 
-        x *= self.mup_input_alpha
+        if self.model_args.use_mup:
+            x *= self.mup_input_alpha
 
         for block in self.layers.values():
             x = block(x, self.freqs_cis)
 
-        x *= self.mup_output_alpha / self.mup_multiplier
-
         x = self.norm(x)
 
+        if self.model_args.use_mup:
+
+            x *= self.mup_output_alpha / self.mup_multiplier
+
+    
         logits = self.output(x)
 
         return logits

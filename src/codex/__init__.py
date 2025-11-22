@@ -35,10 +35,10 @@ __all__ = [
 codex_configs = {
     "small": CodexModelArgs(
         vocab_size=512,
-        d_model=512, 
+        d_model=1024, 
         n_layers=12,
         n_dense_layers=1,
-        n_heads=12,
+        n_heads=16,
         moe_args=MoEArgs(
             num_experts=2,
             num_shared_experts=1,
@@ -47,13 +47,7 @@ codex_configs = {
             route_norm=False,
             score_before_experts=False,
         ),
-        q_lora_rank=256,
-        kv_lora_rank=256,
-        qk_nope_head_dim=32,
-        qk_rope_head_dim=32,
-        v_head_dim=32,
         mscale=0.70,
-        use_residual_scaling=True,
         use_mup=True,
     ),
 }
