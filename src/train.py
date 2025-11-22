@@ -217,7 +217,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 }
                 self.register_model_hooks(model)
                 # Setup CSV logging for activation means (rank 0 only)
-                self.activation_log_dir = (
+                self.activation_log_dir = (  
                     Path(self.job_config.job.dump_folder) / "activation_logs"
                 )
                 self.activation_log_file = (
@@ -457,9 +457,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         hooked_modules = ["attn", "mlp", "tok_embeddings", "output"]
 
         def hook_wrapper(
-            module_name: str, step: int, activation_cache: dict[str, torch.Tensor]
+            module_name: str, activation_cache: dict[str, torch.Tensor]
         ):
             def hook_fn(module, input, output):
+                step = self.step-1
                 _, layer_idx, layer_name = (
                     module_name.split(".")
                     if "." in module_name
@@ -482,8 +483,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         for name, module in model.named_modules():
             if any(name.endswith(module_name) for module_name in hooked_modules):
                 module.register_forward_hook(
-                    hook_wrapper(name, self.step, self.activation_cache)
+                    hook_wrapper(name, self.activation_cache)
                 )
+
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
