@@ -248,10 +248,6 @@ class Training:
     log_activations: bool = False
     """Whether to log activations of the model"""
 
-    mup_runs: int = 1
-    """Number of MUP runs to run"""
-
-
 @dataclass
 class Parallelism:
     data_parallel_replicate_degree: int = 1

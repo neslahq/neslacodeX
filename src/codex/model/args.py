@@ -58,11 +58,11 @@ class CodexModelArgs(BaseModelArgs):
     d_model: int = 768
     inter_dim: int = 10944
     moe_inter_dim: int = 1408
-    n_layers: int = 32
+    n_layers: int = 12
     vocab_size: int = 128256
     max_seq_len: int = 131072
     n_dense_layers: int = 1
-    n_heads: int = 16
+    n_heads: int = 12
     norm_eps: float = 1e-5  # eps used for RMSNorm
     init_std: float = 0.02
 
