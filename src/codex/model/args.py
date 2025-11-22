@@ -101,6 +101,35 @@ class CodexModelArgs(BaseModelArgs):
     g: int = 3
     use_moe: bool = False
 
+    def _apply_dynamic_dims(self) -> None:
+        # Ensure attention head dimension is valid
+        assert (
+            self.d_model % self.n_heads == 0
+        ), f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})"
+        head_dim = self.d_model // self.n_heads
+
+        # Feedforward hidden sizes (standard Transformer: 4x d_model)
+        self.inter_dim = 4 * self.d_model
+        self.moe_inter_dim = max(self.moe_inter_dim, head_dim)  # keep sane minimum
+
+        # MLA/value head dim equals per-head model dim
+        self.v_head_dim = head_dim
+
+        # Split query/key head dim into non-rotary and rotary parts
+        # Choose an even split; ensure sum equals head_dim
+        qk_nope = max(1, head_dim // 2)
+        qk_rope = max(1, head_dim - qk_nope)
+        self.qk_nope_head_dim = qk_nope
+        self.qk_rope_head_dim = qk_rope
+
+        # Rank for KV low-rank path: tie to head_dim but cap to d_model
+        # Keep a reasonable floor for small models
+        self.kv_lora_rank = min(self.d_model, max(128, head_dim))
+
+    def __post_init__(self):
+        # Initialize dynamic fields based on current d_model and n_heads
+        self._apply_dynamic_dims()
+
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
         if seq_len > self.max_seq_len:
@@ -108,6 +137,8 @@ class CodexModelArgs(BaseModelArgs):
                 f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
             )
         self.max_seq_len = seq_len
+        # Re-derive any size-dependent fields in case d_model/n_heads changed via config
+        self._apply_dynamic_dims()
 
         if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
