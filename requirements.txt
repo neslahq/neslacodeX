@@ -34,3 +34,4 @@ tokenizers >= 0.15.0
 safetensors
 flash-linear-attention
 matplotlib
+torchao

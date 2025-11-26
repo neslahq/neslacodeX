@@ -74,10 +74,37 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
+
+        # Collect all unique lr scales from model parameters.
+        lr_scale_set: set[float] = set([1.0])
+        for model in model_parts:
+            for p in model.parameters():
+                if not p.requires_grad:
+                    continue
+                scale = getattr(p, "lr_scale", None)
+                if scale is not None:
+                    lr_scale_set.add(float(scale))
+                all_params.append(p)
+
+        # Sort multipliers for stable param group ordering across all optimizers.
+        lr_scale_list = sorted(lr_scale_set)
+        # build per-model optimizers with identical param groups for each lr scale.
+        self.optimizers = []
         for model in self.model_parts:
-            params = [p for p in model.parameters() if p.requires_grad]
-            self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
-            all_params.extend(params)
+            groups_by_scale: dict[float, list[nn.Parameter]] = {s: [] for s in lr_scale_list}
+            for p in model.parameters():
+                if not p.requires_grad:
+                    continue
+                scale = getattr(p, "lr_scale", 1.0)
+                groups_by_scale[scale].append(p)
+
+            # Always create one param group per lr scale in the same order,
+            # attach lr_scale metadata, but DO NOT override 'lr' here.
+            param_groups: list[dict[str, Any]] = []
+            for s in lr_scale_list:
+                params = groups_by_scale[s]
+                param_groups.append({"params": params, "lr_scale": s})
+            self.optimizers.append(optimizer_cls(param_groups, **optimizer_kwargs))
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, optimizer_kwargs)
 
@@ -88,8 +115,18 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         return len(self.optimizers)
 
     def step(self, *args, **kwargs) -> None:
+        # Temporarily scale per-group lr by lr_scale for this step, then restore.
         for optimizer in self.optimizers:
-            optimizer.step(*args, **kwargs)
+            original_lrs = [g["lr"] for g in optimizer.param_groups]
+            try:
+                for g, lr0 in zip(optimizer.param_groups, original_lrs):
+                    scale = float(g.get("lr_scale", 1.0))
+                    g["lr"] = lr0 * 1.0/scale
+                optimizer.step(*args, **kwargs)
+            finally:
+                # Restore unscaled lrs so lr_scheduler can update cleanly.
+                for g, lr0 in zip(optimizer.param_groups, original_lrs):
+                    g["lr"] = lr0
 
     def zero_grad(self, *args, **kwargs) -> None:
         for optimizer in self.optimizers:
@@ -222,10 +259,23 @@ class FTOptimizersContainer(OptimizersContainer):
         Hence we will need to appropriately dispatch the call.
         """
         if self._use_ft_optimizer:
-            self._use_ft_optimizer = False
-            self._ft_optimizer.step(*args, **kwargs)
-            self._use_ft_optimizer = True
+            # Apply per-group lr scaling for this step, then restore after FT step.
+            original_lrs_per_optim = [[g["lr"] for g in opt.param_groups] for opt in self.optimizers]
+            try:
+                for opt, original_lrs in zip(self.optimizers, original_lrs_per_optim):
+                    for g, lr0 in zip(opt.param_groups, original_lrs):
+                        scale = float(g.get("lr_scale", 1.0))
+                        g["lr"] = lr0 * 1.0/scale
+                self._use_ft_optimizer = False
+                self._ft_optimizer.step(*args, **kwargs)
+                self._use_ft_optimizer = True
+            finally:
+                # Restore unscaled lrs so lr_scheduler can update cleanly.
+                for opt, original_lrs in zip(self.optimizers, original_lrs_per_optim):
+                    for g, lr0 in zip(opt.param_groups, original_lrs):
+                        g["lr"] = lr0
         else:
+            # Fallback path: delegate to parent; parent handles lr scaling.
             super().step(*args, **kwargs)
 
     def zero_grad(self, *args, **kwargs) -> None:

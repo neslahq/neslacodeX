@@ -49,6 +49,8 @@ codex_configs = {
         ),
         mscale=0.70,
         use_mup=True,
+        use_residual_scaling=True,
+        g=1,
     ),
 }
 

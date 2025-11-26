@@ -111,7 +111,7 @@ def main():
 
     out_path = args.out
     if out_path is None:
-        out_path = args.csv.parent / "mup_activations_plot.png"
+        out_path = args.csv.parent / "mup_activations_plot_v7.png"
 
     steps, metrics = read_activation_csv(args.csv)
     if len(steps) == 0:

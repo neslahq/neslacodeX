@@ -201,44 +201,47 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         with torch.device("meta"):
             model = self.train_spec.model_cls(model_args)
-            # register model hooks for activation logging here if enabled
-            if self.job_config.training.log_activations:
-                # attn and mlp activation caches are of shape (n_steps, n_layers)
-                # embedding and output activation caches are of shape (n_steps)
-                # we store the mean activation value for each layer
-                # we put the caches on the same device as the model to avoid data transfer overhead
-                s = self.job_config.training.steps
-                n = self.model_args.n_layers
-                self.activation_cache = {
-                    "embedding": torch.zeros((s,), device=self.device),
-                    "attention": torch.zeros((s, n), device=self.device),
-                    "mlp": torch.zeros((s, n), device=self.device),
-                    "output": torch.zeros((s,), device=self.device),
-                }
-                self.register_model_hooks(model)
-                # Setup CSV logging for activation means (rank 0 only)
-                run = "mup" if self.model_args.use_mup else "sp"
-                self.activation_log_dir = (  
-                    Path(self.job_config.job.dump_folder) / "activation_logs"
-                )
-                self.activation_log_file = (
-                    self.activation_log_dir / f"{run}_activations.csv"
-                )
-                if torch.distributed.get_rank() == 0:
-                    self.activation_log_dir.mkdir(parents=True, exist_ok=True)
-                    if not self.activation_log_file.exists():
-                        with self.activation_log_file.open("w", newline="") as f:
-                            writer = csv.writer(f)
-                            writer.writerow(
-                                [
-                                    "step",
-                                    "model_width",
-                                    "embedding",
-                                    "attention",
-                                    "mlp",
-                                    "output",
-                                ]
-                            )
+        # register model hooks for activation logging here if enabled
+        if self.job_config.training.log_activations:
+            # attn and mlp activation caches are of shape (n_steps, n_layers)
+            # embedding and output activation caches are of shape (n_steps)
+            # we store the mean activation value for each layer
+            # we put the caches on the same device as the model to avoid data transfer overhead
+            s = self.job_config.training.steps
+            n = self.model_args.n_layers
+            self.activation_cache = {
+                "embedding": torch.zeros((s,), device=self.device),
+                "attention": torch.zeros((s, n), device=self.device),
+                "mlp": torch.zeros((s, n), device=self.device),
+                "output": torch.zeros((s,), device=self.device),
+            }
+            self.register_model_hooks(model)
+            # Setup CSV logging for activation means (rank 0 only)
+            run = "mup" if self.model_args.use_mup else "sp"
+            self.activation_log_dir = (  
+                Path(self.job_config.job.dump_folder) / "activation_logs"
+            )
+            self.activation_log_file = (
+                self.activation_log_dir / f"{run}_activations.csv"
+            )
+            if torch.distributed.get_rank() == 0:
+                self.activation_log_dir.mkdir(parents=True, exist_ok=True)
+                if not self.activation_log_file.exists():
+                    with self.activation_log_file.open("w", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(
+                            [
+                                "step",
+                                "model_width",
+                                "embedding",
+                                "attention",
+                                "mlp",
+                                "output",
+                            ]
+                        )
+        
+        if self.model_args.use_mup:
+            self.set_mup_lr_scale(model)
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
@@ -335,6 +338,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 with torch.no_grad():
                     m.init_weights(buffer_device=buffer_device)
                 m.train()
+            # Re-apply MuP lr_scale after pipelining to ensure attributes exist on final params
+            if self.model_args.use_mup:
+                for m in self.model_parts:
+                    self.set_mup_lr_scale(m)
 
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(parallel_dims, job_config, color)
@@ -344,10 +351,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
+                print("Initializing model weights")
                 model.init_weights(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]
+            # Re-apply MuP lr_scale after parallelization to ensure attributes exist on final params
+            if self.model_args.use_mup:
+                self.set_mup_lr_scale(self.model_parts[0])
 
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
@@ -367,9 +378,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.model_parts, job_config.optimizer, parallel_dims, self.ft_manager
         )
 
-        job_config.lr_scheduler.lr_scale *= 1 / (
-            self.model_args.d_model / self.model_args.mup_base_dim
-        )
+
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
             self.optimizers, job_config.lr_scheduler, job_config.training.steps
         )
@@ -486,6 +495,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 module.register_forward_hook(
                     hook_wrapper(name, self.activation_cache)
                 )
+
+    def set_mup_lr_scale(self, model: torch.nn.Module) -> None:
+        # sets mup lr scale for relevant parameters and leaves others at 1.0
+        mup_params = ["w1.weight", "w2.weight", "w3.weight", "wq.weight", "wkv.weight", "wo.weight", "wg.weight", "wq_a.weight", "wq_b.weight", "wkv_a.weight", "wkv_b.weight"]
+        scale = self.model_args.d_model / self.model_args.mup_base_dim
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue 
+
+            if p.dim() >= 2:
+                if any(name.endswith(param) for param in mup_params):
+                    p.lr_scale = scale
+                else:
+                    p.lr_scale = 1.0
+            else:
+                p.lr_scale = 1.0
 
 
     def batch_generator(

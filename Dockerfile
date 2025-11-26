@@ -15,7 +15,7 @@ RUN wget https://bootstrap.pypa.io/get-pip.py && python3.11 get-pip.py && rm get
 ENV TORCH_USE_CUDA_DSA=1
 
 # Install PyTorch, Torchvision, Torchaudio with CUDA 12.8 support, and Transformers
-RUN pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.9.* torchvision torchaudio torchao && \
+RUN pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.9.* torchvision torchaudio && \
 python3.11 -m pip install transformers==4.34.0
 
 # Install NVSHMEM for DEEPEP

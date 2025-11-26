@@ -205,17 +205,19 @@ class MultiHeadLatentAttention(nn.Module):
         )
         self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
 
-        # softmax scale for mup
-        self.softmax_scale = 1.0 / self.qk_head_dim
 
         # gate parameters for gatted attention
         self.wg = nn.Linear(self.dim, self.n_heads * self.v_head_dim, bias=False)
+
+        self.softmax_scale = self.qk_head_dim**-0.5
 
         if model_args.max_seq_len > model_args.original_seq_len:
             mscale = 0.1 * model_args.mscale * math.log(model_args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
         self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
+
+        self.model_args = model_args
 
     def init_weights(self, init_std, mup_multiplier, residual_scale):
         linear_list = [
@@ -233,11 +235,11 @@ class MultiHeadLatentAttention(nn.Module):
         lora_mup_scale = mup_multiplier**-0.25
 
         for linear in linear_list:
-            nn.init.normal_(linear.weight, mean=0.0, std=init_std * lora_mup_scale)
+            nn.init.normal_(linear.weight, mean=0.0, std=init_std * mup_scale)
         nn.init.normal_(self.wg.weight, mean=0.0, std=init_std * mup_scale)
 
         # scale the output projection by both the residual scale and the mup scale
-        nn.init.trunc_normal_(
+        nn.init.normal_(
             self.wo.weight, mean=0.0, std=init_std * residual_scale * mup_scale
         )
 
@@ -302,6 +304,10 @@ class MultiHeadLatentAttention(nn.Module):
         q = q.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         v = v.transpose(1, 2)  # (bsz, n_heads, seqlen, v_head_dim)
+
+        # softmax scale for mup
+        if self.model_args.use_mup:
+            self.softmax_scale = 1.0 / q.size(-1)
 
         output = self.sdpa(q, k, v, scale=self.softmax_scale)
 
@@ -368,11 +374,11 @@ class CodexFeedForward(FeedForward):
         self, init_std, mup_multiplier, residual_scale, buffer_device=None
     ):
         mup_scale = mup_multiplier**-0.5
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=init_std * mup_scale)
-        nn.init.trunc_normal_(
+        nn.init.normal_(self.w1.weight, mean=0.0, std=init_std * mup_scale)
+        nn.init.normal_(
             self.w2.weight, mean=0.0, std=init_std * residual_scale * mup_scale
         )
-        nn.init.trunc_normal_(self.w3.weight, mean=0.0, std=init_std * mup_scale)
+        nn.init.normal_(self.w3.weight, mean=0.0, std=init_std * mup_scale)
 
 
 class Gate(nn.Module):
@@ -629,10 +635,10 @@ class TransformerBlock(nn.Module):
             self.mlp = CodexFeedForward(model_args.d_model, model_args.inter_dim)
         # residual scaling from gpt 2
         self.residual_scale = (
-            1 / (2 * (layer_id + 1)) ** 0.5 if model_args.use_residual_scaling else 1.0
+            ((2 * (model_args.n_layers)) ** -0.5) if model_args.use_residual_scaling else 1.0
         )
         self.mup_multiplier = (
-            model_args.d_model / model_args.mup_base_dim if model_args.use_mup else 1.0
+            (model_args.d_model / model_args.mup_base_dim) if model_args.use_mup else 1.0
         )
         self.init_std = model_args.init_std
         # self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -727,7 +733,7 @@ class Codex(nn.Module):
         # self.transformer.wte.weight = self.lm_head.weight
 
         self.mup_multiplier = (
-            model_args.d_model / model_args.mup_base_dim if model_args.use_mup else 1.0
+            (model_args.d_model / model_args.mup_base_dim) if model_args.use_mup else 1.0
         )
         self.mup_input_alpha = model_args.mup_input_alpha if model_args.use_mup else 1.0
         self.mup_output_alpha = model_args.mup_output_alpha if model_args.use_mup else 1.0
