@@ -178,11 +178,9 @@ def build_lr_schedulers(
                 curr_adjustment = 1 - math.sqrt(progress)
             elif lr_decay_type == "cosine":
                 curr_adjustment = 0.5 * (1.0 + math.cos(math.pi * progress))
-            curr_adjustment = (
-                min_lr_factor + (1 - min_lr_factor) * curr_adjustment * lr_scale
-            )
+            curr_adjustment = min_lr_factor + (1 - min_lr_factor) * curr_adjustment
 
-        return curr_adjustment
+        return curr_adjustment * lr_scale
 
     lr_lambda = functools.partial(
         linear_warmup_stable_decay,
