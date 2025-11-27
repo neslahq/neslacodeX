@@ -205,7 +205,6 @@ class MultiHeadLatentAttention(nn.Module):
         )
         self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
 
-
         # gate parameters for gatted attention
         self.wg = nn.Linear(self.dim, self.n_heads * self.v_head_dim, bias=False)
 
@@ -220,32 +219,35 @@ class MultiHeadLatentAttention(nn.Module):
         self.model_args = model_args
 
     def init_weights(self, init_std, mup_multiplier, residual_scale):
-        linear_list = [
-            self.wkv_a,
-            self.wkv_b,
-        ]
-        if self.q_lora_rank > 0:
-            linear_list.extend([self.wq_a, self.wq_b])
-        else:
-            linear_list.append(self.wq)
-
         mup_scale = mup_multiplier**-0.5
 
-        # since we are using factors of W (lora), and both factors are trained, we split the actual mup scale of W and scale both factors of W symmetrically by the same amount.
-        lora_mup_scale = mup_multiplier**-0.25
+        # Handle wq (Dense or LoRA)
+        if self.q_lora_rank == 0:
+            nn.init.normal_(self.wq.weight, mean=0.0, std=init_std * mup_scale)
+        else:
+            # wq_a: Down projection (d -> r). Use mup_scale (1/sqrt(d)) for stable pre-norm activation
+            nn.init.normal_(self.wq_a.weight, mean=0.0, std=init_std * mup_scale)
+            # wq_b: Up projection (r -> d). Input is normalized (var=1). Scale by 1/sqrt(r) for stable output
+            scale_b = init_std * (self.q_lora_rank**-0.5)
+            nn.init.normal_(self.wq_b.weight, mean=0.0, std=scale_b)
+            self.q_norm.reset_parameters()
 
-        for linear in linear_list:
-            nn.init.normal_(linear.weight, mean=0.0, std=init_std * mup_scale)
+        # Handle wkv (LoRA)
+        # wkv_a: Down projection (d -> r). Use mup_scale (1/sqrt(d))
+        nn.init.normal_(self.wkv_a.weight, mean=0.0, std=init_std * mup_scale)
+
+        # wkv_b: Up projection (r -> d_out). Input is normalized. Scale by 1/sqrt(r)
+        scale_b = init_std * (self.kv_lora_rank**-0.5)
+        nn.init.normal_(self.wkv_b.weight, mean=0.0, std=scale_b)
+        self.kv_norm.reset_parameters()
+
+        # Gate projection
         nn.init.normal_(self.wg.weight, mean=0.0, std=init_std * mup_scale)
 
-        # scale the output projection by both the residual scale and the mup scale
+        # Output projection
         nn.init.normal_(
             self.wo.weight, mean=0.0, std=init_std * residual_scale * mup_scale
         )
-
-        self.kv_norm.reset_parameters()
-        if self.q_lora_rank > 0:
-            self.q_norm.reset_parameters()
 
     def forward(
         self,
@@ -635,10 +637,14 @@ class TransformerBlock(nn.Module):
             self.mlp = CodexFeedForward(model_args.d_model, model_args.inter_dim)
         # residual scaling from gpt 2
         self.residual_scale = (
-            ((2 * (model_args.n_layers)) ** -0.5) if model_args.use_residual_scaling else 1.0
+            ((2 * (model_args.n_layers)) ** -0.5)
+            if model_args.use_residual_scaling
+            else 1.0
         )
         self.mup_multiplier = (
-            (model_args.d_model / model_args.mup_base_dim) if model_args.use_mup else 1.0
+            (model_args.d_model / model_args.mup_base_dim)
+            if model_args.use_mup
+            else 1.0
         )
         self.init_std = model_args.init_std
         # self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -733,10 +739,14 @@ class Codex(nn.Module):
         # self.transformer.wte.weight = self.lm_head.weight
 
         self.mup_multiplier = (
-            (model_args.d_model / model_args.mup_base_dim) if model_args.use_mup else 1.0
+            (model_args.d_model / model_args.mup_base_dim)
+            if model_args.use_mup
+            else 1.0
         )
         self.mup_input_alpha = model_args.mup_input_alpha if model_args.use_mup else 1.0
-        self.mup_output_alpha = model_args.mup_output_alpha if model_args.use_mup else 1.0
+        self.mup_output_alpha = (
+            model_args.mup_output_alpha if model_args.use_mup else 1.0
+        )
 
         # We don't apply init_weights call here since we are using meta init
 
@@ -781,7 +791,6 @@ class Codex(nn.Module):
 
             x *= self.mup_output_alpha / self.mup_multiplier
 
-    
         logits = self.output(x)
 
         return logits
