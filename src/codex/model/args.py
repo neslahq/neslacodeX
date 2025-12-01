@@ -52,7 +52,7 @@ class CodexModelArgs(BaseModelArgs):
         mup_base_dim (int): base model dimension for MUP.
         init_std (float): Standard deviation for the weight initialization.
     """
-
+    use_rope: bool = False
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
     d_model: int = 768
@@ -65,6 +65,8 @@ class CodexModelArgs(BaseModelArgs):
     n_heads: int = 12
     norm_eps: float = 1e-5  # eps used for RMSNorm
     init_std: float = 0.02
+    p: int = 1
+    g: int = 3
 
     # MUP
     use_mup: bool = False
@@ -76,12 +78,13 @@ class CodexModelArgs(BaseModelArgs):
     use_residual_scaling: bool = False
 
     # MoE
+    use_moe: bool = False
     moe_args: MoEArgs = field(default_factory=MoEArgs)
     n_expert_groups: int = 1
     n_limited_groups: int = 1
 
     # Multi-Head Latent Attention (MLA)
-    use_mup: bool = False
+    use_mla: bool = False
     q_lora_rank: int = 0
     kv_lora_rank: int = 512
     qk_nope_head_dim: int = 128
@@ -101,9 +104,8 @@ class CodexModelArgs(BaseModelArgs):
     beta_slow: int = 1
     mscale: float = 1.0
 
-    p: int = 1
-    g: int = 3
-    use_moe: bool = False
+    
+    
 
     def _apply_dynamic_dims(self) -> None:
         # Ensure attention head dimension is valid

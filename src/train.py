@@ -516,10 +516,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             if p.dim() >= 2:
                 if any(name.endswith(param) for param in mup_params):
+                    print(f"Setting lr scale for {name} to {scale}")
                     p.lr_scale = scale
                 else:
+                    print(f"Setting lr scale for {name} to 1.0")
                     p.lr_scale = 1.0
             else:
+                print(f"Setting lr scale for {name} to 1.0")
                 p.lr_scale = 1.0
 
     def batch_generator(

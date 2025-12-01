@@ -144,9 +144,10 @@ class Attention(nn.Module):
 
         self.n_head = model_args.n_heads
         self.n_embd = model_args.d_model
-        self.rotary_pos_emb = RotaryPositionalEmbeddings(
-            model_args.d_model // model_args.n_heads
-        )
+        if model_args.use_rope:
+            self.rotary_pos_emb = RotaryPositionalEmbeddings(
+                model_args.d_model // model_args.n_heads
+            )
 
     def forward(self, x):
         B, T, C = x.size()
@@ -155,8 +156,9 @@ class Attention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head)
         k = k.view(B, T, self.n_head, C // self.n_head)
 
-        q = self.rotary_pos_emb(q)
-        k = self.rotary_pos_emb(k)
+        if self.model_args.use_rope:
+            q = self.rotary_pos_emb(q)
+            k = self.rotary_pos_emb(k)
 
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
@@ -207,15 +209,26 @@ class MultiHeadLatentAttention(nn.Module):
             self.wq_b = nn.Linear(
                 self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=False
             )
-        self.wkv_a = nn.Linear(
-            self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
-        )
-        self.kv_norm = nn.RMSNorm(self.kv_lora_rank, eps=model_args.norm_eps)
-        self.wkv_b = nn.Linear(
+        if self.model_args.use_rope:
+            self.wkv_a = nn.Linear(
+                self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
+            )
+            self.wkv_b = nn.Linear(
             self.kv_lora_rank,
             self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
-        )
+            )
+        else:
+            self.wkv_a = nn.Linear(
+                self.dim, self.kv_lora_rank, bias=False
+            )
+            self.wkv_b = nn.Linear(
+            self.kv_lora_rank,
+            self.n_heads * (self.qk_head_dim + self.v_head_dim),
+            bias=False,
+            )
+        self.kv_norm = nn.RMSNorm(self.kv_lora_rank, eps=model_args.norm_eps)
+        
         self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
 
         # gate parameters for gatted attention
@@ -289,28 +302,37 @@ class MultiHeadLatentAttention(nn.Module):
         # local heads from sizes of q and kv as TP may have sharded them after
         # the above linear ops.
         q = q.view(bsz, seqlen, -1, self.qk_head_dim)
-        q_nope, q_pe = torch.split(
-            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
-        q_pe = apply_rotary_emb(q_pe, freqs_cis)
-        q = torch.cat([q_nope, q_pe], dim=-1)  # (bsz, seqlen, n_heads, qk_head_dim)
+        if self.model_args.use_rope:
+            q_nope, q_pe = torch.split(
+                q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+            q_pe = apply_rotary_emb(q_pe, freqs_cis)
+            q = torch.cat([q_nope, q_pe], dim=-1)  # (bsz, seqlen, n_heads, qk_head_dim)
 
         # Key-value projection
         kv = self.wkv_a(x)  # (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
-        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        if self.model_args.use_rope:
+            kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
-        k_pe = apply_rotary_emb(
-            k_pe.unsqueeze(2), freqs_cis
-        )  # (bsz, seqlen, 1, qk_rope_head_dim)
+            k_pe = apply_rotary_emb(
+                k_pe.unsqueeze(2), freqs_cis
+            )  # (bsz, seqlen, 1, qk_rope_head_dim)
 
-        kv = self.wkv_b(
-            self.kv_norm(kv)
-        )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
-        kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = torch.cat(
-            [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
-        )  # (bsz, seqlen, n_heads, qk_head_dim)
+            kv = self.wkv_b(
+                self.kv_norm(kv)
+            )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
+            kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k = torch.cat(
+                [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
+            )  # (bsz, seqlen, n_heads, qk_head_dim)
+        else:
+            kv = self.wkv_b(
+                self.kv_norm(kv)
+            )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
+            kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
+            k, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
 
         # condition gate parameters with input from the residual stream
         g = self.wg(x)  # (bsz, seqlen, n_heads * v_head_dim)
@@ -691,7 +713,10 @@ class TransformerBlock(nn.Module):
         if self.linear_attention:
             attn_out = self.attn(attn_in)
         else:
-            attn_out = self.attn(attn_in, freqs_cis)
+            if self.model_args.use_mla:
+                attn_out = self.attn(attn_in, freqs_cis)
+            else:
+                attn_out = self.attn(attn_in)
         if isinstance(attn_out, tuple):
             attn_out = attn_out[0]
         x = x + attn_out
@@ -714,9 +739,13 @@ class Codex(nn.Module):
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.d_model)
 
-        self.register_buffer(
-            "freqs_cis", precompute_freqs_cis(model_args), persistent=False
-        )
+        if model_args.use_rope:
+            self.register_buffer(
+                "freqs_cis", precompute_freqs_cis(model_args), persistent=False
+            )
+        else:
+            self.freqs_cis = None
+            self.pos_embeddings = nn.Embedding(model_args.max_seq_len, model_args.d_model)
 
         self.layers = nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
@@ -746,10 +775,13 @@ class Codex(nn.Module):
         # We don't apply init_weights call here since we are using meta init
 
     def init_weights(self, buffer_device):
-        buffer_device = buffer_device or self.freqs_cis.device
-        with torch.device(buffer_device):
-            self.freqs_cis = precompute_freqs_cis(self.model_args)
-        if self.tok_embeddings is not None:
+        if self.model_args.use_rope:
+            buffer_device = buffer_device or self.freqs_cis.device
+            with torch.device(buffer_device):
+                self.freqs_cis = precompute_freqs_cis(self.model_args)
+        else:
+            nn.init.normal_(self.pos_embeddings.weight, mean=0.0, std=self.model_args.init_std)
+        if self.tok_embeddings:
             nn.init.normal_(
                 self.tok_embeddings.weight, mean=0.0, std=self.model_args.init_std
             )
@@ -772,7 +804,11 @@ class Codex(nn.Module):
 
     def forward(self, tokens, input_batch=None):
         B, T = tokens.size()
-        x = self.tok_embeddings(tokens)
+
+        if self.model_args.use_rope:
+            x = self.tok_embeddings(tokens) 
+        else:
+            x = self.tok_embeddings(tokens) + self.pos_embeddings(tokens)
 
         if self.model_args.use_mup:
             x *= self.mup_input_alpha

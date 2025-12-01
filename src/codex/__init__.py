@@ -35,7 +35,7 @@ __all__ = [
 codex_configs = {
     "small": CodexModelArgs(
         vocab_size=512,
-        d_model=1024, 
+        d_model=256, 
         n_layers=12,
         n_dense_layers=1,
         n_heads=16,
@@ -48,9 +48,12 @@ codex_configs = {
             score_before_experts=False,
         ),
         mscale=0.70,
-        use_mup=True,
+        use_mup=False,
         use_residual_scaling=True,
         g=1,
+        use_gelu=True,
+        use_rope=False,
+        use_mla=False,
     ),
 }
 
