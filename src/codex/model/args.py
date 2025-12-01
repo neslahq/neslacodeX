@@ -81,6 +81,7 @@ class CodexModelArgs(BaseModelArgs):
     n_limited_groups: int = 1
 
     # Multi-Head Latent Attention (MLA)
+    use_mup: bool = False
     q_lora_rank: int = 0
     kv_lora_rank: int = 512
     qk_nope_head_dim: int = 128
@@ -113,18 +114,18 @@ class CodexModelArgs(BaseModelArgs):
         self.moe_inter_dim = max(self.moe_inter_dim, head_dim)  # keep sane minimum
 
         # MLA/value head dim equals per-head model dim
-        self.v_head_dim = head_dim
+        # self.v_head_dim = head_dim
 
-        # Split query/key head dim into non-rotary and rotary parts
-        # Choose an even split; ensure sum equals head_dim
-        qk_nope = max(1, head_dim // 2)
-        qk_rope = max(1, head_dim - qk_nope)
-        self.qk_nope_head_dim = qk_nope
-        self.qk_rope_head_dim = qk_rope
+        # # Split query/key head dim into non-rotary and rotary parts
+        # # Choose an even split; ensure sum equals head_dim
+        # qk_nope = max(1, head_dim // 2)
+        # qk_rope = max(1, head_dim - qk_nope)
+        # self.qk_nope_head_dim = qk_nope
+        # self.qk_rope_head_dim = qk_rope
 
-        # Rank for KV low-rank path: tie to head_dim but cap to d_model
-        # Keep a reasonable floor for small models
-        self.kv_lora_rank = min(self.d_model, max(128, head_dim))
+        # # Rank for KV low-rank path: tie to head_dim but cap to d_model
+        # # Keep a reasonable floor for small models
+        # self.kv_lora_rank = min(self.d_model, max(128, head_dim))
 
     def __post_init__(self):
         # Initialize dynamic fields based on current d_model and n_heads

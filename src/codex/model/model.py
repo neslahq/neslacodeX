@@ -133,18 +133,20 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
 
 
 class Attention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, model_args):
         super().__init__()
 
-        assert config.n_embd % config.n_head == 0
+        assert model_args.d_model % model_args.n_heads == 0
 
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_attn = nn.Linear(model_args.d_model, 3 * model_args.d_model)
+        self.c_proj = nn.Linear(model_args.d_model, model_args.d_model)
         self.c_proj.RESIDUAL_SCALE = 1
 
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.rotary_pos_emb = RotaryPositionalEmbeddings(config.n_embd // config.n_head)
+        self.n_head = model_args.n_heads
+        self.n_embd = model_args.d_model
+        self.rotary_pos_emb = RotaryPositionalEmbeddings(
+            model_args.d_model // model_args.n_heads
+        )
 
     def forward(self, x):
         B, T, C = x.size()
@@ -160,12 +162,21 @@ class Attention(nn.Module):
         k = k.transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        q = self.rotary_pos_emb(q)
-        k = self.rotary_pos_emb(k)
+        attention_scale = 1.0 / q.size(-1) ** 0.5
+        if self.model_args.use_mup:
+            attention_scale = 1.0 / q.size(-1)
 
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        attn = F.scaled_dot_product_attention(
+            q, k, v, scale=attention_scale, is_causal=True
+        )
         attn = attn.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(attn)
+
+    def init_weights(self, init_std, mup_multiplier, residual_scale):
+        nn.init.normal_(self.c_attn.weight, mean=0.0, std=init_std * mup_multiplier)
+        nn.init.normal_(
+            self.c_proj.weight, mean=0.0, std=init_std * mup_multiplier * residual_scale
+        )
 
 
 # Adapted from https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/deepseek_v3/model/model.py#L147 to include gated attetion
@@ -183,6 +194,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.kv_lora_rank = model_args.kv_lora_rank
         self.qk_nope_head_dim = model_args.qk_nope_head_dim
         self.qk_rope_head_dim = model_args.qk_rope_head_dim
+        # the RoPE dimension is just the subset of the head dimension that gets rotated
         self.qk_head_dim = model_args.qk_nope_head_dim + model_args.qk_rope_head_dim
         self.v_head_dim = model_args.v_head_dim
 
@@ -623,7 +635,10 @@ class TransformerBlock(nn.Module):
                 mode="chunk",
             )
         else:
-            self.attn = MultiHeadLatentAttention(model_args)
+            if model_args.use_mla:
+                self.attn = MultiHeadLatentAttention(model_args)
+            else:
+                self.attn = Attention(model_args)
         self.ln_2 = nn.RMSNorm(model_args.d_model)
         self.moe_enabled = use_moe
         if use_moe:
@@ -713,30 +728,6 @@ class Codex(nn.Module):
         self.output = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False)
 
         self.tok_embeddings.weight = self.output.weight
-
-        # self.transformer = nn.ModuleDict(
-        #     dict(
-        #         wte=nn.Embedding(model_args.vocab_size, model_args.d_model),
-        #         # use moe for every pth layer if use_moe is true
-        #         # use linear attention for every layer and standard attention for every gth layer
-        #         h=nn.ModuleList(
-        #             [
-        #                 TransformerBlock(
-        #                     model_args,
-        #                     i,
-        #                     use_moe=((i % model_args.p) == 0 and model_args.use_moe),
-        #                     linear_attention=(i % model_args.g) != 0,
-        #                 )
-        #                 for i in range(model_args.n_layers)
-        #             ]
-        #         ),
-        #         ln_f=nn.RMSNorm(model_args.d_model),
-        #     )
-        # )
-
-        # self.lm_head = nn.Linear(model_args.d_model, model_args.vocab_size)
-
-        # self.transformer.wte.weight = self.lm_head.weight
 
         self.mup_multiplier = (
             (model_args.d_model / model_args.mup_base_dim)

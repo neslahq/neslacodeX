@@ -218,7 +218,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.register_model_hooks(model)
             # Setup CSV logging for activation means (rank 0 only)
             run = "mup" if self.model_args.use_mup else "sp"
-            self.activation_log_dir = (  
+            self.activation_log_dir = (
                 Path(self.job_config.job.dump_folder) / "activation_logs"
             )
             self.activation_log_file = (
@@ -239,7 +239,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                                 "output",
                             ]
                         )
-        
+
         if self.model_args.use_mup:
             self.set_mup_lr_scale(model)
 
@@ -378,7 +378,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.model_parts, job_config.optimizer, parallel_dims, self.ft_manager
         )
 
-
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
             self.optimizers, job_config.lr_scheduler, job_config.training.steps
         )
@@ -466,11 +465,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     def register_model_hooks(self, model: torch.nn.Module):
         hooked_modules = ["attn", "mlp", "tok_embeddings", "output"]
 
-        def hook_wrapper(
-            module_name: str, activation_cache: dict[str, torch.Tensor]
-        ):
+        def hook_wrapper(module_name: str, activation_cache: dict[str, torch.Tensor]):
             def hook_fn(module, input, output):
-                step = self.step-1
+                step = self.step - 1
                 _, layer_idx, layer_name = (
                     module_name.split(".")
                     if "." in module_name
@@ -492,17 +489,29 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         for name, module in model.named_modules():
             if any(name.endswith(module_name) for module_name in hooked_modules):
-                module.register_forward_hook(
-                    hook_wrapper(name, self.activation_cache)
-                )
+                module.register_forward_hook(hook_wrapper(name, self.activation_cache))
 
     def set_mup_lr_scale(self, model: torch.nn.Module) -> None:
         # sets mup lr scale for relevant parameters and leaves others at 1.0
-        mup_params = ["w1.weight", "w2.weight", "w3.weight", "wq.weight", "wkv.weight", "wo.weight", "wg.weight", "wq_a.weight", "wq_b.weight", "wkv_a.weight", "wkv_b.weight"]
+        mup_params = [
+            "w1.weight",
+            "w2.weight",
+            "w3.weight",
+            "wq.weight",
+            "wkv.weight",
+            "wo.weight",
+            "wg.weight",
+            "wq_a.weight",
+            "wq_b.weight",
+            "wkv_a.weight",
+            "wkv_b.weight",
+            "c_attn.weight",
+            "c_proj.weight",
+        ]
         scale = self.model_args.d_model / self.model_args.mup_base_dim
         for name, p in model.named_parameters():
             if not p.requires_grad:
-                continue 
+                continue
 
             if p.dim() >= 2:
                 if any(name.endswith(param) for param in mup_params):
@@ -511,7 +520,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     p.lr_scale = 1.0
             else:
                 p.lr_scale = 1.0
-
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
