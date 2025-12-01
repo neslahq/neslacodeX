@@ -90,6 +90,9 @@ class CodexModelArgs(BaseModelArgs):
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
 
+    # MLP
+    use_gelu: bool = False
+
     # yarn
     original_seq_len: int = 4096
     rope_theta: float = 10000.0

@@ -506,6 +506,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "wkv_a.weight",
             "wkv_b.weight",
             "c_attn.weight",
+            "c_fc.weight",
             "c_proj.weight",
         ]
         scale = self.model_args.d_model / self.model_args.mup_base_dim

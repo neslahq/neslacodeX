@@ -173,9 +173,10 @@ class Attention(nn.Module):
         return self.c_proj(attn)
 
     def init_weights(self, init_std, mup_multiplier, residual_scale):
-        nn.init.normal_(self.c_attn.weight, mean=0.0, std=init_std * mup_multiplier)
+        mup_scale = mup_multiplier**-0.5
+        nn.init.normal_(self.c_attn.weight, mean=0.0, std=init_std * mup_scale)
         nn.init.normal_(
-            self.c_proj.weight, mean=0.0, std=init_std * mup_multiplier * residual_scale
+            self.c_proj.weight, mean=0.0, std=init_std * mup_scale * residual_scale
         )
 
 
@@ -341,27 +342,27 @@ class MultiHeadLatentAttention(nn.Module):
 
 
 class MLP(nn.Module):
+
     def __init__(self, model_args):
         super().__init__()
-
-        d_ff = 3 * model_args.d_model
-        assert d_ff % 2 == 0
-        self.c_fc = nn.Linear(model_args.d_model, d_ff)
-        self.c_proj = nn.Linear(d_ff // 2, model_args.d_model)
-        self.c_proj.RESIDUAL_SCALE = 1
-        self.silu = nn.SiLU()
-
-    def init_weights(self, init_std, buffer_device=None):
-        nn.init.trunc_normal_(self.c_fc.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.c_proj.weight, mean=0.0, std=init_std)
+        self.c_fc = nn.Linear(model_args.d_model, model_args.inter_dim)
+        self.gelu = nn.GELU()
+        self.c_proj = nn.Linear(model_args.inter_dim, model_args.d_model)
 
     def forward(self, x):
-        """
-        swiglu based on flash attention implementation
-        """
-        y = self.c_fc(x)
-        y, gate = y.chunk(2, dim=-1)
-        return self.c_proj(self.silu(y) * gate)
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        return x
+
+    def init_weights(
+        self, init_std, mup_multiplier, residual_scale, buffer_device=None
+    ):
+        mup_scale = mup_multiplier**-0.5
+        nn.init.normal_(self.c_fc.weight, mean=0.0, std=init_std * mup_scale)
+        nn.init.normal_(
+            self.c_proj.weight, mean=0.0, std=init_std * residual_scale * mup_scale
+        )
 
 
 class CodexGroupedExperts(GroupedExperts):
@@ -649,7 +650,10 @@ class TransformerBlock(nn.Module):
                 model_args,
             )
         else:
-            self.mlp = CodexFeedForward(model_args.d_model, model_args.inter_dim)
+            if model_args.use_gelu:
+                self.mlp = MLP(model_args)
+            else:
+                self.mlp = CodexFeedForward(model_args.d_model, model_args.inter_dim)
         # residual scaling from gpt 2
         self.residual_scale = (
             ((2 * (model_args.n_layers)) ** -0.5)
