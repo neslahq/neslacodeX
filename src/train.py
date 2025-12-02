@@ -222,7 +222,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 Path(self.job_config.job.dump_folder) / "activation_logs"
             )
             self.activation_log_file = (
-                self.activation_log_dir / f"{run}_activations.csv"
+                self.activation_log_dir / f"{run}_activations_baseline_rope_swiglu_warmup5.csv"
             )
             if torch.distributed.get_rank() == 0:
                 self.activation_log_dir.mkdir(parents=True, exist_ok=True)
@@ -468,7 +468,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         def hook_wrapper(module_name: str, activation_cache: dict[str, torch.Tensor]):
             def hook_fn(module, input, output):
                 step = self.step - 1
-                _, layer_idx, layer_name = (
+                _, layer_idx, layer_name, *extra = (
                     module_name.split(".")
                     if "." in module_name
                     else (module_name, 0, module_name)

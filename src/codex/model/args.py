@@ -54,7 +54,7 @@ class CodexModelArgs(BaseModelArgs):
     """
     use_rope: bool = False
     max_batch_size: int = 8
-    max_seq_len: int = 4096 * 4
+    max_seq_len: int = 4096 
     d_model: int = 768
     inter_dim: int = 10944
     moe_inter_dim: int = 1408

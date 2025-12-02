@@ -148,6 +148,7 @@ class Attention(nn.Module):
             self.rotary_pos_emb = RotaryPositionalEmbeddings(
                 model_args.d_model // model_args.n_heads
             )
+        self.model_args = model_args
 
     def forward(self, x):
         B, T, C = x.size()
@@ -691,6 +692,8 @@ class TransformerBlock(nn.Module):
         # self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
+        self.model_args = model_args
+
     def init_weights(self, buffer_device):
         for norm in (self.ln_1, self.ln_2):
             norm.reset_parameters()
@@ -732,8 +735,6 @@ class Codex(nn.Module):
 
     def __init__(self, model_args):
         super().__init__()
-
-        model_args.inter_dim = model_args.d_model * 4
 
         self.model_args = model_args
 
@@ -808,7 +809,10 @@ class Codex(nn.Module):
         if self.model_args.use_rope:
             x = self.tok_embeddings(tokens) 
         else:
-            x = self.tok_embeddings(tokens) + self.pos_embeddings(tokens)
+            tok_embeddings = self.tok_embeddings(tokens)
+            pos = torch.arange(0, tokens.shape[1], dtype=torch.long, device=tokens.device)
+            pos_embeddings = self.pos_embeddings(pos)
+            x = tok_embeddings + pos_embeddings
 
         if self.model_args.use_mup:
             x *= self.mup_input_alpha
