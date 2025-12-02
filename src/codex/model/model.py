@@ -215,21 +215,19 @@ class MultiHeadLatentAttention(nn.Module):
                 self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
             )
             self.wkv_b = nn.Linear(
-            self.kv_lora_rank,
-            self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False,
+                self.kv_lora_rank,
+                self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
+                bias=False,
             )
         else:
-            self.wkv_a = nn.Linear(
-                self.dim, self.kv_lora_rank, bias=False
-            )
+            self.wkv_a = nn.Linear(self.dim, self.kv_lora_rank, bias=False)
             self.wkv_b = nn.Linear(
-            self.kv_lora_rank,
-            self.n_heads * (self.qk_head_dim + self.v_head_dim),
-            bias=False,
+                self.kv_lora_rank,
+                self.n_heads * (self.qk_head_dim + self.v_head_dim),
+                bias=False,
             )
         self.kv_norm = nn.RMSNorm(self.kv_lora_rank, eps=model_args.norm_eps)
-        
+
         self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
 
         # gate parameters for gatted attention
@@ -313,7 +311,9 @@ class MultiHeadLatentAttention(nn.Module):
         # Key-value projection
         kv = self.wkv_a(x)  # (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
         if self.model_args.use_rope:
-            kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            kv, k_pe = torch.split(
+                kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
 
             k_pe = apply_rotary_emb(
                 k_pe.unsqueeze(2), freqs_cis
@@ -323,7 +323,9 @@ class MultiHeadLatentAttention(nn.Module):
                 self.kv_norm(kv)
             )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
             kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
-            k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k_nope, v = torch.split(
+                kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            )
             k = torch.cat(
                 [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
             )  # (bsz, seqlen, n_heads, qk_head_dim)
@@ -333,7 +335,6 @@ class MultiHeadLatentAttention(nn.Module):
             )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
             kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
             k, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
 
         # condition gate parameters with input from the residual stream
         g = self.wg(x)  # (bsz, seqlen, n_heads * v_head_dim)
@@ -405,8 +406,15 @@ class CodexGroupedExperts(GroupedExperts):
 
 
 class CodexFeedForward(FeedForward):
-    def __init__(self, dim, hidden_dim):
+    def __init__(self, dim, hidden_dim, ffn_scale: float = 1.0):
         super().__init__(dim, hidden_dim)
+        self.ffn_scale = float(ffn_scale)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = super().forward(x)
+        if self.ffn_scale != 1.0:
+            out = out * self.ffn_scale
+        return out
 
     def init_weights(
         self, init_std, mup_multiplier, residual_scale, buffer_device=None
@@ -534,7 +542,9 @@ class MoE(nn.Module):
 
         self.shared_experts = (
             CodexFeedForward(
-                dim=dim, hidden_dim=hidden_dim * moe_args.num_shared_experts
+                dim=dim,
+                hidden_dim=hidden_dim * moe_args.num_shared_experts,
+                ffn_scale=model_args.ffn_scale,
             )
             if moe_args.num_shared_experts > 0
             else None
@@ -676,7 +686,11 @@ class TransformerBlock(nn.Module):
             if model_args.use_gelu:
                 self.mlp = MLP(model_args)
             else:
-                self.mlp = CodexFeedForward(model_args.d_model, model_args.inter_dim)
+                self.mlp = CodexFeedForward(
+                    model_args.d_model,
+                    model_args.inter_dim,
+                    ffn_scale=model_args.ffn_scale,
+                )
         # residual scaling from gpt 2
         self.residual_scale = (
             ((2 * (model_args.n_layers)) ** -0.5)
@@ -746,7 +760,9 @@ class Codex(nn.Module):
             )
         else:
             self.freqs_cis = None
-            self.pos_embeddings = nn.Embedding(model_args.max_seq_len, model_args.d_model)
+            self.pos_embeddings = nn.Embedding(
+                model_args.max_seq_len, model_args.d_model
+            )
 
         self.layers = nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
@@ -781,7 +797,9 @@ class Codex(nn.Module):
             with torch.device(buffer_device):
                 self.freqs_cis = precompute_freqs_cis(self.model_args)
         else:
-            nn.init.normal_(self.pos_embeddings.weight, mean=0.0, std=self.model_args.init_std)
+            nn.init.normal_(
+                self.pos_embeddings.weight, mean=0.0, std=self.model_args.init_std
+            )
         if self.tok_embeddings:
             nn.init.normal_(
                 self.tok_embeddings.weight, mean=0.0, std=self.model_args.init_std
@@ -807,10 +825,12 @@ class Codex(nn.Module):
         B, T = tokens.size()
 
         if self.model_args.use_rope:
-            x = self.tok_embeddings(tokens) 
+            x = self.tok_embeddings(tokens)
         else:
             tok_embeddings = self.tok_embeddings(tokens)
-            pos = torch.arange(0, tokens.shape[1], dtype=torch.long, device=tokens.device)
+            pos = torch.arange(
+                0, tokens.shape[1], dtype=torch.long, device=tokens.device
+            )
             pos_embeddings = self.pos_embeddings(pos)
             x = tok_embeddings + pos_embeddings
 

@@ -89,6 +89,9 @@ class Model:
     tokenizer_name: str | None = None
     """Tokenizer name for GPT tokenizer"""
 
+    ffn_scale: float | None = None
+    """Optional override for Codex feedforward scaling"""
+
     converters: list[str] = field(default_factory=list)
     """
     Comma separated list of converters to apply to the model.
@@ -247,6 +250,7 @@ class Training:
 
     log_activations: bool = False
     """Whether to log activations of the model"""
+
 
 @dataclass
 class Parallelism:
@@ -764,6 +768,21 @@ class Validation:
         assert (
             self.steps > 0 or self.steps == -1
         ), "validation steps must be positive or -1"
+
+
+@dataclass
+class Sweep:
+    enable: bool = False
+    """Whether to enable sweep"""
+
+    max_width: int = 1024
+    """Maximum width to sweep"""
+
+    eps: float = 1e-6
+    """Epsilon for stability score"""
+
+    param: str = "ffn_scale"
+    """Parameter to sweep"""
 
 
 @dataclass

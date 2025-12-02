@@ -52,9 +52,10 @@ class CodexModelArgs(BaseModelArgs):
         mup_base_dim (int): base model dimension for MUP.
         init_std (float): Standard deviation for the weight initialization.
     """
+
     use_rope: bool = False
     max_batch_size: int = 8
-    max_seq_len: int = 4096 
+    max_seq_len: int = 4096
     d_model: int = 768
     inter_dim: int = 10944
     moe_inter_dim: int = 1408
@@ -67,6 +68,7 @@ class CodexModelArgs(BaseModelArgs):
     init_std: float = 0.02
     p: int = 1
     g: int = 3
+    ffn_scale: float = 1.0
 
     # MUP
     use_mup: bool = False
@@ -103,9 +105,6 @@ class CodexModelArgs(BaseModelArgs):
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.0
-
-    
-    
 
     def _apply_dynamic_dims(self) -> None:
         # Ensure attention head dimension is valid
@@ -145,6 +144,9 @@ class CodexModelArgs(BaseModelArgs):
         self.max_seq_len = seq_len
         # Re-derive any size-dependent fields in case d_model/n_heads changed via config
         self._apply_dynamic_dims()
+
+        if getattr(job_config.model, "ffn_scale", None) is not None:
+            self.ffn_scale = float(job_config.model.ffn_scale)
 
         if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(

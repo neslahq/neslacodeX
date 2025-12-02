@@ -218,11 +218,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.register_model_hooks(model)
             # Setup CSV logging for activation means (rank 0 only)
             run = "mup" if self.model_args.use_mup else "sp"
+            sweep = "sweep" if self.job_config.sweep.enable else ""
+            param = self.job_config.sweep.param if self.job_config.sweep.enable else ""
+            value = self.model_args.ffn_scale if self.job_config.sweep.enable else ""
             self.activation_log_dir = (
                 Path(self.job_config.job.dump_folder) / "activation_logs"
             )
             self.activation_log_file = (
-                self.activation_log_dir / f"{run}_activations_baseline_rope_swiglu_warmup5.csv"
+                self.activation_log_dir
+                / f"{run}_activations_baseline_rope_swiglu_{sweep}_{param}_{value}.csv"
             )
             if torch.distributed.get_rank() == 0:
                 self.activation_log_dir.mkdir(parents=True, exist_ok=True)
@@ -827,6 +831,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             logger.info("Sleeping 2 seconds for other ranks to complete")
             time.sleep(2)
 
+        if torch.distributed.get_rank() == 0:
+            if (
+                self.job_config.sweep.enable
+                and self.model_args.d_model == self.job_config.sweep.max_width
+            ):
+                # TODO: wrap this in sweep utils
+                df = pd.read_csv(self.activation_log_file)
+                mean_df = df.groupby("step").mean()
+                std_df = df.groupby("step").std()
+                cv_df = std_df / (mean_df + self.job_config.sweep.eps)
+                stability_score = cv_df.mean().item()
+                self.metrics_processor.log(
+                    {"stability_score": stability_score}, self.step
+                )
         logger.info("Training completed")
 
     def should_continue_training(self) -> bool:
