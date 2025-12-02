@@ -8,7 +8,7 @@ import wandb
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = REPO_ROOT / "src" / "codex" / "train_configs" / "debug_model.toml"
-DEFAULT_RUN_SCRIPT = REPO_ROOT / "torchtitan" / "run_width_sweep.sh"
+DEFAULT_RUN_SCRIPT = REPO_ROOT / "run_width_sweep.sh"
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--entity",
         type=str,
-        default=os.getenv("WANDB_TEAM"),
+        default=os.getenv("WANDB_TEAM", "nesla-lab"),
         help="Optional W&B entity (team).",
     )
     parser.add_argument(
@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         "--method",
         type=str,
         choices=("grid", "random", "bayes"),
-        default="grid",
+        default="random",
         help="W&B sweep search strategy.",
     )
     parser.add_argument(
@@ -178,7 +178,7 @@ def main() -> None:
     else:
         print(
             "Launch the agent with:\n"
-            f"  WANDB_PROJECT={args.project} "
+            f"WANDB_PROJECT={args.project} "
             f"WANDB_TEAM={args.entity or ''} "
             f"CONFIG_FILE={config_path} "
             f"NGPU={args.ngpu} "

@@ -24,4 +24,3 @@ for width in "${WIDTHS[@]}"; do
     --experimental.custom_import "${CUSTOM_IMPORT}" \
     "${EXTRA_ARGS[@]}"
 done
-
