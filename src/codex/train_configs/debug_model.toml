@@ -27,7 +27,7 @@ lr = 6e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 5  # lr scheduler warm up
+warmup_steps = 2  # lr scheduler warm up
 
 [training]
 local_batch_size = 4
@@ -76,7 +76,7 @@ freq = 500
 steps = 1200 # Recommend value for c4_validation with world-size=8 and seq_len=8192
 
 [sweep]
-enable = false 
+enable = true 
 max_width = 1024
 eps = 1e-8
 param = "ffn_scale"

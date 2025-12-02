@@ -811,6 +811,7 @@ class JobConfig:
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
     experimental: Experimental = field(default_factory=Experimental)
     validation: Validation = field(default_factory=Validation)
+    sweep: Sweep = field(default_factory=Sweep)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

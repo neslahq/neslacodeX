@@ -73,11 +73,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ffn-scale-min",
         type=float,
+        default=0.0,
         help="Lower bound for ffn_scale (used when sampling).",
     )
     parser.add_argument(
         "--ffn-scale-max",
         type=float,
+        default=1.0,
         help="Upper bound for ffn_scale (used when sampling).",
     )
     parser.add_argument(
@@ -90,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--count",
         type=int,
-        default=None,
+        default=100,
         help="Optional limit for how many runs the local agent should launch.",
     )
     parser.add_argument(
@@ -132,7 +134,8 @@ def _build_command(run_script: Path, extra_args: Sequence[str] | None) -> list[s
     command = ["${env}", "bash", str(run_script)]
     if extra_args:
         command.extend(extra_args)
-    command.extend(["--model.ffn_scale", "${ffn_scale}"])
+    
+    command.extend(["${--model.ffn_scale=${ffn_scale}"])
     return command
 
 
@@ -172,7 +175,6 @@ def main() -> None:
         print("Starting local wandb agent...")
         wandb.agent(
             sweep_id=sweep_id,
-            function=run_sweep,
             count=args.count,
         )
     else:
