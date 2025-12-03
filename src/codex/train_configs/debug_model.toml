@@ -79,4 +79,5 @@ steps = 1200 # Recommend value for c4_validation with world-size=8 and seq_len=8
 enable = true 
 max_width = 1024
 eps = 1e-8
-param = "ffn_scale"
+params = ["ffn_scale"]
+

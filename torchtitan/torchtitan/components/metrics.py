@@ -143,7 +143,7 @@ class WandBLogger(BaseLogger):
         # Create logging directory
         os.makedirs(log_dir, exist_ok=True)
 
-        self.wandb.init(
+        run = self.wandb.init(
             entity=os.getenv("WANDB_TEAM", None),
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
             name=os.getenv("WANDB_RUN_NAME", None),
@@ -151,6 +151,8 @@ class WandBLogger(BaseLogger):
             config=job_config.to_dict(),
         )
         logger.info("WandB logging enabled")
+
+        self.run_config = run.config
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
         wandb_metrics = {
@@ -162,6 +164,9 @@ class WandBLogger(BaseLogger):
     def close(self) -> None:
         if self.wandb.run is not None:
             self.wandb.finish()
+
+    def get_run_config(self) -> dict[str, Any]:
+        return self.run_config
 
 
 class LoggerContainer(BaseLogger):
@@ -184,6 +189,12 @@ class LoggerContainer(BaseLogger):
     def close(self) -> None:
         for logger_instance in self._loggers:
             logger_instance.close()
+
+    def get_run_config(self):
+        for logger_instance in self._loggers:
+            if hasattr(logger_instance, "get_run_config"):
+                return logger_instance.get_run_config()
+        return None
 
 
 def ensure_pp_loss_visible(
@@ -488,6 +499,9 @@ class MetricsProcessor:
 
     def close(self):
         self.logger.close()
+
+    def get_run_config(self):
+        return self.logger.get_run_config()
 
 
 def build_metrics_processor(

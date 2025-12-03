@@ -781,8 +781,8 @@ class Sweep:
     eps: float = 1e-6
     """Epsilon for stability score"""
 
-    param: str = "ffn_scale"
-    """Parameter to sweep"""
+    params: list[str] = field(default_factory=list)
+    """List of parameters to sweep"""
 
 
 @dataclass

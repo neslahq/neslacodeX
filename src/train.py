@@ -158,7 +158,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # build model (using meta init)
         model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
-        model_args.update_from_config(job_config)
+        if self.job_config.sweep.enable:
+            sweep_config = self.metrics_processor.get_run_config()
+        else:
+            sweep_config = None
+        model_args.update_from_config(job_config, sweep_config=sweep_config)
         # Ensure vocab_size matches the tokenizer to avoid out-of-range embedding indices
         if self.tokenizer is not None:
             try:
