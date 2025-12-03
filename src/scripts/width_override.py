@@ -2,7 +2,7 @@ import os
 
 from torchtitan.tools.logging import logger
 
-from . import codex_configs
+from src.codex import codex_configs
 
 
 def _override_width_from_env() -> None:

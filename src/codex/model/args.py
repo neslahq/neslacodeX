@@ -158,18 +158,18 @@ class CodexModelArgs(BaseModelArgs):
             raise NotImplementedError(
                 "CP support for FlexAttention is still in progress."
             )
+            
 
-        if job_config.sweep.enable:
-            sweep_config = kwargs.get("sweep_config", None)
-            if sweep_config is not None:
-                for param in job_config.sweep.params:
-                    if hasattr(sweep_config, param):
-                        setattr(self, param, getattr(sweep_config, param))
-                        logger.info(f"Updated {param} to {getattr(self, param)}")
-                    else:
-                        logger.warning(f"Parameter {param} not found in sweep config")
-            else:
-                logger.warning("No sweep config found")
+    def update_from_sweep_config(self, job_config: JobConfig, sweep_config) -> None:
+        if sweep_config is not None:
+            for param in job_config.sweep.params:
+                if hasattr(sweep_config, param):
+                    setattr(self, param, getattr(sweep_config, param))
+                    logger.info(f"Updated {param} to {getattr(self, param)}")
+                else:
+                    logger.warning(f"Parameter {param} not found in sweep config")
+        else:
+            logger.warning("No sweep config found")
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams_embedding = 0

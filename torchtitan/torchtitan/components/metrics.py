@@ -143,7 +143,7 @@ class WandBLogger(BaseLogger):
         # Create logging directory
         os.makedirs(log_dir, exist_ok=True)
 
-        run = self.wandb.init(
+        self.run = self.wandb.init(
             entity=os.getenv("WANDB_TEAM", None),
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
             name=os.getenv("WANDB_RUN_NAME", None),
@@ -151,8 +151,6 @@ class WandBLogger(BaseLogger):
             config=job_config.to_dict(),
         )
         logger.info("WandB logging enabled")
-
-        self.run_config = run.config
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
         wandb_metrics = {
@@ -166,7 +164,11 @@ class WandBLogger(BaseLogger):
             self.wandb.finish()
 
     def get_run_config(self) -> dict[str, Any]:
-        return self.run_config
+        run_config = self.run.config
+        sweep_id = self.run.sweep_id
+        setattr(run_config, "sweep_id", sweep_id)
+        setattr(run_config, "run_id", self.run.id)
+        return run_config
 
 
 class LoggerContainer(BaseLogger):
@@ -396,6 +398,9 @@ class MetricsProcessor:
     def should_log(self, step: int) -> bool:
         return step == 1 or step % self.job_config.metrics.log_freq == 0
 
+    def sweep_log(self, metrics: dict[str, Any], step: int) -> None:
+        self.logger.log(metrics, step)
+
     def log(
         self,
         step: int,
@@ -403,7 +408,12 @@ class MetricsProcessor:
         global_max_loss: float,
         grad_norm: float,
         extra_metrics: dict[str, Any] | None = None,
+        sweep_log = False,
     ):
+        if sweep_log:
+            self.sweep_log(extra_metrics, step)
+            return
+
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
 
         time_delta = time.perf_counter() - self.time_last_log

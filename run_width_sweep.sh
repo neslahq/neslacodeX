@@ -9,7 +9,7 @@ DEFAULT_CONFIG_FILE="${ROOT_DIR}/src/codex/train_configs/debug_model.toml"
 CONFIG_FILE="${CONFIG_FILE:-${DEFAULT_CONFIG_FILE}}"
 EXTRA_ARGS=("$@")
 WIDTHS=(256 512 1024)
-CUSTOM_IMPORT="src.codex.width_override"
+CUSTOM_IMPORT="src.scripts.width_override"
 
 for width in "${WIDTHS[@]}"; do
   echo "============================================================"

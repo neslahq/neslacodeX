@@ -15,6 +15,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 import csv
 from pathlib import Path
+import pandas as pd
 
 import torchtitan.protocols.train_spec as train_spec_module
 import sys
@@ -158,11 +159,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # build model (using meta init)
         model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
+        model_args.update_from_config(job_config)
+
+        # metrics logging
+        build_metrics_processor_fn = (
+            build_metrics_processor
+            if self.train_spec.build_metrics_processor_fn is None
+            else self.train_spec.build_metrics_processor_fn
+        )
+        self.metrics_processor = build_metrics_processor_fn(
+            job_config, parallel_dims, model_args
+        )
+        color = self.metrics_processor.color
+
+        # set model args from sweep config
         if self.job_config.sweep.enable:
             sweep_config = self.metrics_processor.get_run_config()
-        else:
-            sweep_config = None
-        model_args.update_from_config(job_config, sweep_config=sweep_config)
+            model_args.update_from_sweep_config(job_config, sweep_config)
+
         # Ensure vocab_size matches the tokenizer to avoid out-of-range embedding indices
         if self.tokenizer is not None:
             try:
@@ -222,15 +236,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.register_model_hooks(model)
             # Setup CSV logging for activation means (rank 0 only)
             run = "mup" if self.model_args.use_mup else "sp"
-            sweep = "sweep" if self.job_config.sweep.enable else ""
-            param = self.job_config.sweep.param if self.job_config.sweep.enable else ""
-            value = self.model_args.ffn_scale if self.job_config.sweep.enable else ""
+            sweep_id = sweep_config.sweep_id if self.job_config.sweep.enable else ""
+            run_id = sweep_config.run_id if self.job_config.sweep.enable else ""
+
             self.activation_log_dir = (
-                Path(self.job_config.job.dump_folder) / "activation_logs"
-            )
+                Path(self.job_config.job.dump_folder) / "activation_logs" / f"{sweep_id}"
+            ) if self.job_config.sweep.enable else (Path(self.job_config.job.dump_folder) / "activation_logs")
             self.activation_log_file = (
                 self.activation_log_dir
-                / f"{run}_activations_baseline_rope_swiglu_{sweep}_{param}_{value}.csv"
+                / f"{run}_activations_baseline_rope_swiglu_{sweep_id}_{run_id}.csv"
             )
             if torch.distributed.get_rank() == 0:
                 self.activation_log_dir.mkdir(parents=True, exist_ok=True)
@@ -254,17 +268,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
         model_converters.convert(model)
-
-        # metrics logging
-        build_metrics_processor_fn = (
-            build_metrics_processor
-            if self.train_spec.build_metrics_processor_fn is None
-            else self.train_spec.build_metrics_processor_fn
-        )
-        self.metrics_processor = build_metrics_processor_fn(
-            job_config, parallel_dims, model_args
-        )
-        color = self.metrics_processor.color
 
         # calculate model size and flops per token
         (
@@ -524,13 +527,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             if p.dim() >= 2:
                 if any(name.endswith(param) for param in mup_params):
-                    print(f"Setting lr scale for {name} to {scale}")
                     p.lr_scale = scale
                 else:
-                    print(f"Setting lr scale for {name} to 1.0")
                     p.lr_scale = 1.0
             else:
-                print(f"Setting lr scale for {name} to 1.0")
                 p.lr_scale = 1.0
 
     def batch_generator(
@@ -845,9 +845,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 mean_df = df.groupby("step").mean()
                 std_df = df.groupby("step").std()
                 cv_df = std_df / (mean_df + self.job_config.sweep.eps)
-                stability_score = cv_df.mean().item()
+                stability_score = cv_df["mlp"].mean().item()
                 self.metrics_processor.log(
-                    {"stability_score": stability_score}, self.step
+                    self.step,
+                    global_avg_loss=0.0,
+                    global_max_loss=0.0,
+                    grad_norm=0.0,
+                    extra_metrics={"stability_score": stability_score},
+                    sweep_log=True,
                 )
         logger.info("Training completed")
 

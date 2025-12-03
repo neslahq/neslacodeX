@@ -114,7 +114,7 @@ def main():
 
     out_path = args.out
     if out_path is None:
-        out_path = args.csv.parent / f"{args.tag}_baseline_activations_rope_swiglu_warmup5_plot.png"
+        out_path = args.csv.parent / f"{args.tag}_baseline_activations_rope_swiglu_ww51tbq3_f624w152.png"
 
     steps, metrics = read_activation_csv(args.csv)
     if len(steps) == 0:

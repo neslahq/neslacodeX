@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--count",
         type=int,
-        default=100,
+        default=10,
         help="Optional limit for how many runs the local agent should launch.",
     )
     parser.add_argument(
