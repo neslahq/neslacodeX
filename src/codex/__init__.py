@@ -53,7 +53,8 @@ codex_configs = {
         g=1,
         use_gelu=False,
         use_rope=True,
-        use_mla=False,
+        use_mla=True,
+        ffn_scale=0.6159611964441745,
     ),
 }
 

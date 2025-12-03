@@ -210,7 +210,7 @@ class MultiHeadLatentAttention(nn.Module):
             self.wq_b = nn.Linear(
                 self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=False
             )
-        if self.model_args.use_rope:
+        if model_args.use_rope:
             self.wkv_a = nn.Linear(
                 self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
             )
@@ -253,7 +253,8 @@ class MultiHeadLatentAttention(nn.Module):
             # wq_a: Down projection (d -> r). Use mup_scale (1/sqrt(d)) for stable pre-norm activation
             nn.init.normal_(self.wq_a.weight, mean=0.0, std=init_std * mup_scale)
             # wq_b: Up projection (r -> d). Input is normalized (var=1). Scale by 1/sqrt(r) for stable output
-            scale_b = init_std * (self.q_lora_rank**-0.5)
+            # scale_b = init_std * (self.q_lora_rank**-0.5)
+            scale_b = init_std * mup_scale
             nn.init.normal_(self.wq_b.weight, mean=0.0, std=scale_b)
             self.q_norm.reset_parameters()
 
@@ -262,7 +263,8 @@ class MultiHeadLatentAttention(nn.Module):
         nn.init.normal_(self.wkv_a.weight, mean=0.0, std=init_std * mup_scale)
 
         # wkv_b: Up projection (r -> d_out). Input is normalized. Scale by 1/sqrt(r)
-        scale_b = init_std * (self.kv_lora_rank**-0.5)
+        # scale_b = init_std * (self.kv_lora_rank**-0.5)
+        scale_b = init_std * mup_scale
         nn.init.normal_(self.wkv_b.weight, mean=0.0, std=scale_b)
         self.kv_norm.reset_parameters()
 

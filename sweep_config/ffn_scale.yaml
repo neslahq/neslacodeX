@@ -1,0 +1,15 @@
+program: run_width_sweep.sh
+name: codex_ffn_scale
+method: random
+metric:
+  name: stability_score
+  goal: minimize
+parameters:
+  ffn_scale:
+    min: 0.0
+    max: 2.0
+    distribution: uniform
+command: 
+  - ${env}
+  - bash
+  - ${program}

@@ -245,7 +245,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.activation_log_file = (
                 self.activation_log_dir
                 / f"{run}_activations_baseline_rope_swiglu_{sweep_id}_{run_id}.csv"
-            )
+            ) if self.job_config.sweep.enable else (self.activation_log_dir / f"{run}_activations_baseline_rope_swiglu_mla.csv")
             if torch.distributed.get_rank() == 0:
                 self.activation_log_dir.mkdir(parents=True, exist_ok=True)
                 if not self.activation_log_file.exists():

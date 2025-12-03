@@ -145,8 +145,6 @@ class CodexModelArgs(BaseModelArgs):
         # Re-derive any size-dependent fields in case d_model/n_heads changed via config
         self._apply_dynamic_dims()
 
-        if getattr(job_config.model, "ffn_scale", None) is not None:
-            self.ffn_scale = float(job_config.model.ffn_scale)
 
         if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
