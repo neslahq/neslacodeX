@@ -14,6 +14,10 @@ from torchtitan.models.moe import GroupedExperts, FeedForward, MoEArgs
 from torchtitan.models.attention import build_attention
 
 
+def spectral_scale(init_std, fan_in, fan_out):
+    return init_std / math.sqrt(fan_in) * min(1, math.sqrt(fan_out / fan_in))
+
+
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
 def precompute_freqs_cis(args) -> torch.Tensor:
     """
@@ -148,6 +152,21 @@ class Attention(nn.Module):
             self.rotary_pos_emb = RotaryPositionalEmbeddings(
                 model_args.d_model // model_args.n_heads
             )
+
+        if model_args.use_spectral_norm:
+            self.c_attn_scale = spectral_scale(
+                model_args.init_std, model_args.d_model, 3 * model_args.d_model
+            )
+            self.c_proj_scale = spectral_scale(
+                model_args.init_std, model_args.d_model, model_args.d_model
+            )
+        elif model_args.use_mup:
+            self.c_attn_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+            self.c_proj_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+        else:
+            self.c_attn_scale = model_args.init_std
+            self.c_proj_scale = model_args.init_std
+
         self.model_args = model_args
 
     def forward(self, x):
@@ -175,11 +194,10 @@ class Attention(nn.Module):
         attn = attn.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(attn)
 
-    def init_weights(self, init_std, mup_multiplier, residual_scale):
-        mup_scale = mup_multiplier**-0.5
-        nn.init.normal_(self.c_attn.weight, mean=0.0, std=init_std * mup_scale)
+    def init_weights(self, residual_scale):
+        nn.init.normal_(self.c_attn.weight, mean=0.0, std=self.c_attn_scale)
         nn.init.normal_(
-            self.c_proj.weight, mean=0.0, std=init_std * mup_scale * residual_scale
+            self.c_proj.weight, mean=0.0, std=self.c_proj_scale * residual_scale
         )
 
 
@@ -233,6 +251,67 @@ class MultiHeadLatentAttention(nn.Module):
         # gate parameters for gatted attention
         self.wg = nn.Linear(self.dim, self.n_heads * self.v_head_dim, bias=False)
 
+        if model_args.use_spectral_norm:
+            if self.q_lora_rank == 0:
+                self.wq_scale = spectral_scale(
+                    model_args.init_std, self.dim, self.n_heads * self.qk_head_dim
+                )
+            else:
+                self.wq_a_scale = spectral_scale(
+                    model_args.init_std, self.dim, self.q_lora_rank
+                )
+                self.wq_b_scale = spectral_scale(
+                    model_args.init_std,
+                    self.q_lora_rank,
+                    self.n_heads * self.qk_head_dim,
+                )
+            if model_args.use_rope:
+                self.wkv_a_scale = spectral_scale(
+                    model_args.init_std,
+                    self.dim,
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                )
+                self.wkv_b_scale = spectral_scale(
+                    model_args.init_std,
+                    self.kv_lora_rank,
+                    self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
+                )
+            else:
+                self.wkv_a_scale = spectral_scale(
+                    model_args.init_std, self.dim, self.kv_lora_rank
+                )
+                self.wkv_b_scale = spectral_scale(
+                    model_args.init_std,
+                    self.kv_lora_rank,
+                    self.n_heads * (self.qk_head_dim + self.v_head_dim),
+                )
+            self.wg_scale = spectral_scale(
+                model_args.init_std, self.dim, self.n_heads * self.v_head_dim
+            )
+            self.wo_scale = spectral_scale(
+                model_args.init_std, self.n_heads * self.v_head_dim, self.dim
+            )
+        elif model_args.use_mup:
+            if self.q_lora_rank == 0:
+                self.wq_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+            else:
+                self.wq_a_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+                self.wq_b_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+            self.wkv_a_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+            self.wkv_b_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+            self.wg_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+            self.wo_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+        else:
+            if self.q_lora_rank == 0:
+                self.wq_scale = model_args.init_std
+            else:
+                self.wq_a_scale = model_args.init_std
+                self.wq_b_scale = model_args.init_std
+            self.wkv_a_scale = model_args.init_std
+            self.wkv_b_scale = model_args.init_std
+            self.wg_scale = model_args.init_std
+            self.wo_scale = model_args.init_std
+
         self.softmax_scale = self.qk_head_dim**-0.5
 
         if model_args.max_seq_len > model_args.original_seq_len:
@@ -248,33 +327,30 @@ class MultiHeadLatentAttention(nn.Module):
 
         # Handle wq (Dense or LoRA)
         if self.q_lora_rank == 0:
-            nn.init.normal_(self.wq.weight, mean=0.0, std=init_std * mup_scale)
+            nn.init.normal_(self.wq.weight, mean=0.0, std=self.wq_scale)
         else:
             # wq_a: Down projection (d -> r). Use mup_scale (1/sqrt(d)) for stable pre-norm activation
-            nn.init.normal_(self.wq_a.weight, mean=0.0, std=init_std * mup_scale)
+            nn.init.normal_(self.wq_a.weight, mean=0.0, std=self.wq_a_scale)
             # wq_b: Up projection (r -> d). Input is normalized (var=1). Scale by 1/sqrt(r) for stable output
             # scale_b = init_std * (self.q_lora_rank**-0.5)
-            scale_b = init_std * mup_scale
-            nn.init.normal_(self.wq_b.weight, mean=0.0, std=scale_b)
+            nn.init.normal_(self.wq_b.weight, mean=0.0, std=self.wq_b_scale)
             self.q_norm.reset_parameters()
 
         # Handle wkv (LoRA)
         # wkv_a: Down projection (d -> r). Use mup_scale (1/sqrt(d))
-        nn.init.normal_(self.wkv_a.weight, mean=0.0, std=init_std * mup_scale)
+        nn.init.normal_(self.wkv_a.weight, mean=0.0, std=self.wkv_a_scale)
 
         # wkv_b: Up projection (r -> d_out). Input is normalized. Scale by 1/sqrt(r)
         # scale_b = init_std * (self.kv_lora_rank**-0.5)
         scale_b = init_std * mup_scale
-        nn.init.normal_(self.wkv_b.weight, mean=0.0, std=scale_b)
+        nn.init.normal_(self.wkv_b.weight, mean=0.0, std=self.wkv_b_scale)
         self.kv_norm.reset_parameters()
 
         # Gate projection
-        nn.init.normal_(self.wg.weight, mean=0.0, std=init_std * mup_scale)
+        nn.init.normal_(self.wg.weight, mean=0.0, std=self.wg_scale)
 
         # Output projection
-        nn.init.normal_(
-            self.wo.weight, mean=0.0, std=init_std * residual_scale * mup_scale
-        )
+        nn.init.normal_(self.wo.weight, mean=0.0, std=self.wo_scale * residual_scale)
 
     def forward(
         self,
@@ -375,19 +451,30 @@ class MLP(nn.Module):
         self.gelu = nn.GELU()
         self.c_proj = nn.Linear(model_args.inter_dim, model_args.d_model)
 
+        if model_args.use_spectral_norm:
+            self.c_fc_scale = spectral_scale(
+                model_args.init_std, model_args.d_model, model_args.inter_dim
+            )
+            self.c_proj_scale = spectral_scale(
+                model_args.init_std, model_args.inter_dim, model_args.d_model
+            )
+        elif model_args.use_mup:
+            self.c_fc_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+            self.c_proj_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+        else:
+            self.c_fc_scale = model_args.init_std
+            self.c_proj_scale = model_args.init_std
+
     def forward(self, x):
         x = self.c_fc(x)
         x = self.gelu(x)
         x = self.c_proj(x)
         return x
 
-    def init_weights(
-        self, init_std, mup_multiplier, residual_scale, buffer_device=None
-    ):
-        mup_scale = mup_multiplier**-0.5
-        nn.init.normal_(self.c_fc.weight, mean=0.0, std=init_std * mup_scale)
+    def init_weights(self, residual_scale, buffer_device=None):
+        nn.init.normal_(self.c_fc.weight, mean=0.0, std=self.c_fc_scale)
         nn.init.normal_(
-            self.c_proj.weight, mean=0.0, std=init_std * residual_scale * mup_scale
+            self.c_proj.weight, mean=0.0, std=self.c_proj_scale * residual_scale
         )
 
 
@@ -395,22 +482,47 @@ class CodexGroupedExperts(GroupedExperts):
     def __init__(self, dim, hidden_dim, num_experts, use_grouped_mm):
         super().__init__(dim, hidden_dim, num_experts, use_grouped_mm)
 
-    def init_weights(self, init_std, mup_multiplier, residual_scale):
+        if model_args.use_spectral_norm:
+            self.w1_scale = spectral_scale(model_args.init_std, dim, hidden_dim)
+            self.w2_scale = spectral_scale(model_args.init_std, hidden_dim, dim)
+            self.w3_scale = spectral_scale(model_args.init_std, dim, hidden_dim)
+        elif model_args.use_mup:
+            self.w1_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+            self.w2_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+            self.w3_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+        else:
+            self.w1_scale = model_args.init_std
+            self.w2_scale = model_args.init_std
+            self.w3_scale = model_args.init_std
 
-        mup_scale = mup_multiplier**-0.5
-        nn.init.trunc_normal_(self.w1, mean=0.0, std=init_std * mup_scale)
+    def init_weights(self, residual_scale):
+
+        nn.init.trunc_normal_(self.w1, mean=0.0, std=self.w1_scale)
         # w2 is the projection weight, it should be scaled by the mup scale and the residual scale
-        nn.init.trunc_normal_(
-            self.w2, mean=0.0, std=init_std * residual_scale * mup_scale
-        )
+        nn.init.trunc_normal_(self.w2, mean=0.0, std=self.w2_scale * residual_scale)
         # w3 is the gate weight, i'm not convinced it should be scaled by the residual scale
-        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std * mup_scale)
+        nn.init.trunc_normal_(self.w3, mean=0.0, std=self.w3_scale)
 
 
 class CodexFeedForward(FeedForward):
-    def __init__(self, dim, hidden_dim, ffn_scale: float = 1.0):
+    def __init__(
+        self, dim, hidden_dim, ffn_scale: float = 1.0, model_args: CodexModelArgs = None
+    ):
         super().__init__(dim, hidden_dim)
         self.ffn_scale = float(ffn_scale)
+
+        if model_args.use_spectral_norm:
+            self.w1_scale = spectral_scale(model_args.init_std, dim, hidden_dim)
+            self.w2_scale = spectral_scale(model_args.init_std, hidden_dim, dim)
+            self.w3_scale = spectral_scale(model_args.init_std, dim, hidden_dim)
+        elif model_args.use_mup:
+            self.w1_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+            self.w2_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+            self.w3_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+        else:
+            self.w1_scale = model_args.init_std
+            self.w2_scale = model_args.init_std
+            self.w3_scale = model_args.init_std
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = super().forward(x)
@@ -418,15 +530,10 @@ class CodexFeedForward(FeedForward):
             out = out * self.ffn_scale
         return out
 
-    def init_weights(
-        self, init_std, mup_multiplier, residual_scale, buffer_device=None
-    ):
-        mup_scale = mup_multiplier**-0.5
-        nn.init.normal_(self.w1.weight, mean=0.0, std=init_std * mup_scale)
-        nn.init.normal_(
-            self.w2.weight, mean=0.0, std=init_std * residual_scale * mup_scale
-        )
-        nn.init.normal_(self.w3.weight, mean=0.0, std=init_std * mup_scale)
+    def init_weights(self, residual_scale, buffer_device=None):
+        nn.init.normal_(self.w1.weight, mean=0.0, std=self.w1_scale)
+        nn.init.normal_(self.w2.weight, mean=0.0, std=self.w2_scale * residual_scale)
+        nn.init.normal_(self.w3.weight, mean=0.0, std=self.w3_scale)
 
 
 class Gate(nn.Module):
@@ -450,10 +557,15 @@ class Gate(nn.Module):
         self.n_groups = model_args.n_expert_groups
         self.n_limited_groups = model_args.n_limited_groups
         self.route_scale = route_scale
+        if model_args.use_spectral_norm:
+            self.w_gate_scale = spectral_scale(model_args.init_std, dim, num_experts)
+        elif model_args.use_mup:
+            self.w_gate_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+        else:
+            self.w_gate_scale = model_args.init_std
 
-    def init_weights(self, init_std: float, mup_multiplier: float):
-        mup_scale = mup_multiplier**-0.5
-        nn.init.trunc_normal_(self.w_gate.weight, mean=0.0, std=init_std * mup_scale)
+    def init_weights(self):
+        nn.init.trunc_normal_(self.w_gate.weight, mean=0.0, std=self.w_gate_scale)
 
     def forward(self, x, expert_bias=None):
         """
@@ -577,15 +689,13 @@ class MoE(nn.Module):
 
     def init_weights(
         self,
-        init_std: float,
-        mup_multiplier: float,
         residual_scale: float,
         buffer_device: torch.device,
     ):
-        self.experts.init_weights(init_std, mup_multiplier, residual_scale)
-        self.router.init_weights(init_std, mup_multiplier)
+        self.experts.init_weights(residual_scale)
+        self.router.init_weights()
         if self.shared_experts is not None:
-            self.shared_experts.init_weights(init_std, mup_multiplier, residual_scale)
+            self.shared_experts.init_weights(residual_scale)
 
         with torch.device(buffer_device):
             self.tokens_per_expert = torch.zeros(
@@ -699,13 +809,13 @@ class TransformerBlock(nn.Module):
             if model_args.use_residual_scaling
             else 1.0
         )
-        self.mup_multiplier = (
-            (model_args.d_model / model_args.mup_base_dim)
-            if model_args.use_mup
-            else 1.0
-        )
-        self.init_std = model_args.init_std
-        # self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
+        # self.mup_multiplier = (
+        #     (model_args.d_model / model_args.mup_base_dim)
+        #     if model_args.use_mup
+        #     else 1.0
+        # )
+        # self.init_std = model_args.init_std
+        # # self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
         self.model_args = model_args
@@ -714,18 +824,12 @@ class TransformerBlock(nn.Module):
         for norm in (self.ln_1, self.ln_2):
             norm.reset_parameters()
         if not self.linear_attention:
-            self.attn.init_weights(
-                self.init_std, self.mup_multiplier, self.residual_scale
-            )
+            self.attn.init_weights(self.residual_scale)
 
         if self.moe_enabled:
-            self.moe.init_weights(
-                self.init_std, self.mup_multiplier, self.residual_scale, buffer_device
-            )
+            self.moe.init_weights(self.residual_scale, buffer_device)
         else:
-            self.mlp.init_weights(
-                self.init_std, self.mup_multiplier, self.residual_scale, buffer_device
-            )
+            self.mlp.init_weights(self.residual_scale, buffer_device)
 
     def forward(self, x, freqs_cis):
         attn_in = self.ln_1(x)
@@ -781,11 +885,7 @@ class Codex(nn.Module):
 
         self.tok_embeddings.weight = self.output.weight
 
-        self.mup_multiplier = (
-            (model_args.d_model / model_args.mup_base_dim)
-            if model_args.use_mup
-            else 1.0
-        )
+        self.mup_multiplier = model_args.mup_multiplier
         self.mup_input_alpha = model_args.mup_input_alpha if model_args.use_mup else 1.0
         self.mup_output_alpha = (
             model_args.mup_output_alpha if model_args.use_mup else 1.0
@@ -811,6 +911,17 @@ class Codex(nn.Module):
                 layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
+
+        # TODO: Confirm if this is correct cause we are using tied weights
+        if model_args.use_spectral_norm:
+            self.output_scale = spectral_scale(
+                model_args.init_std, model_args.d_model, model_args.vocab_size
+            )
+        elif model_args.use_mup:
+            self.output_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+        else:
+            self.output_scale = model_args.init_std
+        nn.init.normal_(self.output.weight, mean=0.0, std=self.output_scale)
         # TODO: confirm if this is correct, also we are using tied weights
         # final_out_std = self.model_args.d_model**-0.5
         # cutoff_factor = 3

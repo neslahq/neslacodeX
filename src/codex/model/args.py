@@ -74,7 +74,11 @@ class CodexModelArgs(BaseModelArgs):
     mup_base_dim: int = 256
     mup_input_alpha: float = 1.0
     mup_output_alpha: float = 1.0
+    mup_multiplier: float = 1.0
     ffn_scale: float = 1.0
+
+    # Spectral Normalization
+    use_spectral_norm: bool = False
 
     # residual scaling
     use_residual_scaling: bool = False
@@ -117,6 +121,9 @@ class CodexModelArgs(BaseModelArgs):
         self.inter_dim = 4 * self.d_model
         self.moe_inter_dim = max(self.moe_inter_dim, head_dim)  # keep sane minimum
 
+        if self.use_mup:
+            self.mup_multiplier = self.d_model / self.mup_base_dim
+
         # MLA/value head dim equals per-head model dim
         # self.v_head_dim = head_dim
 
@@ -145,7 +152,6 @@ class CodexModelArgs(BaseModelArgs):
         # Re-derive any size-dependent fields in case d_model/n_heads changed via config
         self._apply_dynamic_dims()
 
-
         if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
                 "Failed to use grouped mm, which is only supported on SM90 or later",
@@ -156,7 +162,6 @@ class CodexModelArgs(BaseModelArgs):
             raise NotImplementedError(
                 "CP support for FlexAttention is still in progress."
             )
-            
 
     def update_from_sweep_config(self, job_config: JobConfig, sweep_config) -> None:
         if sweep_config is not None:
