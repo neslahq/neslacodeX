@@ -91,7 +91,9 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         # build per-model optimizers with identical param groups for each lr scale.
         self.optimizers = []
         for model in self.model_parts:
-            groups_by_scale: dict[float, list[nn.Parameter]] = {s: [] for s in lr_scale_list}
+            groups_by_scale: dict[float, list[nn.Parameter]] = {
+                s: [] for s in lr_scale_list
+            }
             for p in model.parameters():
                 if not p.requires_grad:
                     continue
@@ -121,7 +123,7 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
             try:
                 for g, lr0 in zip(optimizer.param_groups, original_lrs):
                     scale = float(g.get("lr_scale", 1.0))
-                    g["lr"] = lr0 * 1.0/scale
+                    g["lr"] = lr0 * scale
                 optimizer.step(*args, **kwargs)
             finally:
                 # Restore unscaled lrs so lr_scheduler can update cleanly.
@@ -260,12 +262,14 @@ class FTOptimizersContainer(OptimizersContainer):
         """
         if self._use_ft_optimizer:
             # Apply per-group lr scaling for this step, then restore after FT step.
-            original_lrs_per_optim = [[g["lr"] for g in opt.param_groups] for opt in self.optimizers]
+            original_lrs_per_optim = [
+                [g["lr"] for g in opt.param_groups] for opt in self.optimizers
+            ]
             try:
                 for opt, original_lrs in zip(self.optimizers, original_lrs_per_optim):
                     for g, lr0 in zip(opt.param_groups, original_lrs):
                         scale = float(g.get("lr_scale", 1.0))
-                        g["lr"] = lr0 * 1.0/scale
+                        g["lr"] = lr0 * 1.0 / scale
                 self._use_ft_optimizer = False
                 self._ft_optimizer.step(*args, **kwargs)
                 self._use_ft_optimizer = True

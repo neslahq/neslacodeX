@@ -240,12 +240,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             run_id = sweep_config.run_id if self.job_config.sweep.enable else ""
 
             self.activation_log_dir = (
-                Path(self.job_config.job.dump_folder) / "activation_logs" / f"{sweep_id}"
-            ) if self.job_config.sweep.enable else (Path(self.job_config.job.dump_folder) / "activation_logs")
+                (
+                    Path(self.job_config.job.dump_folder)
+                    / "activation_logs"
+                    / f"{sweep_id}"
+                )
+                if self.job_config.sweep.enable
+                else (Path(self.job_config.job.dump_folder) / "activation_logs")
+            )
             self.activation_log_file = (
-                self.activation_log_dir
-                / f"{run}_activations_baseline_rope_swiglu_{sweep_id}_{run_id}.csv"
-            ) if self.job_config.sweep.enable else (self.activation_log_dir / f"{run}_activations_baseline_rope_swiglu_mla.csv")
+                (
+                    self.activation_log_dir
+                    / f"{run}_activations_baseline_rope_swiglu_{sweep_id}_{run_id}.csv"
+                )
+                if self.job_config.sweep.enable
+                else (
+                    self.activation_log_dir
+                    / f"{run}_activations_baseline_rope_swiglu_mla.csv"
+                )
+            )
             if torch.distributed.get_rank() == 0:
                 self.activation_log_dir.mkdir(parents=True, exist_ok=True)
                 if not self.activation_log_file.exists():
@@ -504,7 +517,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     def set_mup_lr_scale(self, model: torch.nn.Module) -> None:
         # sets mup lr scale for relevant parameters and leaves others at 1.0
-        mup_params = [
+        scalable_params = [
             "w1.weight",
             "w2.weight",
             "w3.weight",
@@ -520,14 +533,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "c_fc.weight",
             "c_proj.weight",
         ]
-        scale = self.model_args.d_model / self.model_args.mup_base_dim
+        if self.model_args.use_spectral_norm:
+            scale = lambda x: x.shape[1] / x.shape[0]
+        elif self.model_args.use_mup:
+            scale = lambda x: 1 / self.model_args.mup_multiplier
+        else:
+            scale = lambda x: 1.0
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
 
             if p.dim() >= 2:
-                if any(name.endswith(param) for param in mup_params):
-                    p.lr_scale = scale
+                if any(name.endswith(param) for param in scalable_params):
+                    p.lr_scale = scale(p)
                 else:
                     p.lr_scale = 1.0
             else:
