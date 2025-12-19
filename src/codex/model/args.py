@@ -71,7 +71,7 @@ class CodexModelArgs(BaseModelArgs):
     norm_eps: float = 1e-5  # eps used for RMSNorm
     init_std: float = 0.02
     p: int = 1
-    g: int = 3
+    g: int = 1
 
     # MUP
     use_mup: bool = False

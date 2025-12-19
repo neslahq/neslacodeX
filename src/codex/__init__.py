@@ -48,13 +48,13 @@ codex_configs = {
             score_before_experts=False,
         ),
         mscale=0.70,
-        use_mup=True,
+        use_mup=False,
+        use_spectral_norm=True,
         use_residual_scaling=True,
         g=1,
-        use_gelu=False,
-        use_rope=True,
-        use_mla=True,
-        ffn_scale=0.6159611964441745,
+        use_gelu=True,
+        use_rope=False,
+        use_mla=False,
     ),
 }
 

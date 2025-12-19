@@ -12,10 +12,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torchtune.modules import RotaryPositionalEmbeddings
 from torchtitan.models.moe import GroupedExperts, FeedForward, MoEArgs
 from torchtitan.models.attention import build_attention
+from .args import CodexModelArgs
 
 
 def spectral_scale(init_std, fan_in, fan_out):
-    return init_std / math.sqrt(fan_in) * min(1, math.sqrt(fan_out / fan_in))
+    return (init_std / math.sqrt(fan_in)) * min(1, math.sqrt(fan_out / fan_in))
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -913,15 +914,15 @@ class Codex(nn.Module):
             self.norm.reset_parameters()
 
         # TODO: Confirm if this is correct cause we are using tied weights
-        if model_args.use_spectral_norm:
-            self.output_scale = spectral_scale(
-                model_args.init_std, model_args.d_model, model_args.vocab_size
-            )
-        elif model_args.use_mup:
-            self.output_scale = model_args.init_std * model_args.mup_multiplier**-0.5
-        else:
-            self.output_scale = model_args.init_std
-        nn.init.normal_(self.output.weight, mean=0.0, std=self.output_scale)
+        # if self.model_args.use_spectral_norm:
+        #     self.output_scale = spectral_scale(
+        #         self.model_args.init_std, self.model_args.d_model, self.model_args.vocab_size
+        #     )
+        # elif self.model_args.use_mup:
+        #     self.output_scale = self.model_args.init_std * self.model_args.mup_multiplier**-0.5
+        # else: 
+        #     self.output_scale = self.model_args.init_std
+        nn.init.normal_(self.output.weight, mean=0.0, std=self.model_args.init_std)
         # TODO: confirm if this is correct, also we are using tied weights
         # final_out_std = self.model_args.d_model**-0.5
         # cutoff_factor = 3
@@ -955,7 +956,7 @@ class Codex(nn.Module):
 
         x = self.norm(x)
 
-        if self.model_args.use_mup:
+        if self.model_args.use_mup or self.model_args.use_spectral_norm:
 
             x *= self.mup_output_alpha / self.mup_multiplier
 

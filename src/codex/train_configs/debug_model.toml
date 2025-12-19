@@ -19,7 +19,7 @@ hf_assets_path = ""
 converters = []
 tokenizer_name = "allenai/Olmo-3-1025-7B"
 tokenizer_path = ""
-ffn_scale = 0.6159611964441745
+ffn_scale = 1.0
 
 [optimizer]
 name = "AdamW"

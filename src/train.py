@@ -262,7 +262,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             }
             self.register_model_hooks(model)
             # Setup CSV logging for activation means (rank 0 only)
-            run = "mup" if self.model_args.use_mup else "sp"
+            run = "mup" if self.model_args.use_mup else "mup_sp" if self.model_args.use_spectral_norm else "sp"
             sweep_id = sweep_config.sweep_id if self.job_config.sweep.enable else ""
             run_id = sweep_config.run_id if self.job_config.sweep.enable else ""
 
@@ -278,12 +278,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.activation_log_file = (
                 (
                     self.activation_log_dir
-                    / f"{run}_activations_baseline_rope_swiglu_{sweep_id}_{run_id}.csv"
+                    / f"{run}_activations_baseline_spectral_{sweep_id}_{run_id}.csv"
                 )
                 if self.job_config.sweep.enable
                 else (
                     self.activation_log_dir
-                    / f"{run}_activations_baseline_rope_swiglu_mla.csv"
+                    / f"{run}_activations_baseline_spectral.csv"
                 )
             )
             if torch.distributed.get_rank() == 0:
@@ -408,7 +408,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             self.model_parts = [model]
             # Re-apply MuP lr_scale after parallelization to ensure attributes exist on final params
-            if self.model_args.use_mup:
+            if self.model_args.use_mup or self.model_args.use_spectral_norm:
                 self.set_mup_lr_scale(self.model_parts[0])
 
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
@@ -561,7 +561,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "c_proj.weight",
         ]
         if self.model_args.use_spectral_norm:
-            scale = lambda x: x.shape[1] / x.shape[0]
+            scale = lambda x: x.shape[0] / x.shape[1]
         elif self.model_args.use_mup:
             scale = lambda x: 1 / self.model_args.mup_multiplier
         else:
@@ -573,6 +573,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if p.dim() >= 2:
                 if any(name.endswith(param) for param in scalable_params):
                     p.lr_scale = scale(p)
+                    print(f"param shape: {p.shape}")
+                    print(f"Scaling {name} by {p.lr_scale}")
                 else:
                     p.lr_scale = 1.0
             else:
