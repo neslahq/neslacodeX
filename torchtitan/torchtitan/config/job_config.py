@@ -141,6 +141,27 @@ class Optimizer:
     register_post_accumulate_grad_hook after the optimizer is built.
     """
 
+    norm_factor: str = "spectral"
+    """Which norm factor to use"""
+
+    backend_steps: int = 5
+    """Number of steps to run Scion backend"""
+
+    momentum: float = 0.95
+    """Scion momentum to use"""
+
+    nesterov: bool = False
+    """Whether to use Nesterov momentum in Scion"""
+
+    extra_param_group_split_rules: list[dict[str, Any]] | None = None
+    """Extra parameter group splitting rules for Scion optimizers"""
+
+    zeropower_backend: str = "newtonschulz5"
+    """Zeropower backend to use"""
+
+    is_light: bool = False
+    """Whether to use Scion's light (memory-saving) version"""
+
 
 @dataclass
 class LRScheduler:
