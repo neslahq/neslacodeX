@@ -37,7 +37,7 @@ local_batch_size = 4
 seq_len = 1024
 max_norm = 1.0  # grad norm clipping
 steps = 10
-dataset = "allenai/dolma3_mix-6T"
+dataset = "dolma3_mix-6T_train"
 dataset_path = ""
 log_activations = true
 
@@ -74,7 +74,7 @@ filter_fqns = ["output"]
 
 [validation]
 enable = false
-dataset = "c4_validation"
+dataset = "dolma3_mix-6T_validation"
 freq = 500
 steps = 1200 # Recommend value for c4_validation with world-size=8 and seq_len=8192
 

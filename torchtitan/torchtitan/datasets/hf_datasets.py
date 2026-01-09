@@ -35,7 +35,7 @@ def _process_c4_text(sample: dict[str, Any]) -> str:
 def _load_shakespeare_dataset(dataset_path: str):
     # Expand environment variables in the path
     expanded_path = os.path.expandvars(dataset_path)
-    
+
     # If dataset_path points to a directory, use the standard text loader
     if os.path.isdir(expanded_path):
         return load_dataset("text", data_dir=expanded_path)
@@ -44,7 +44,7 @@ def _load_shakespeare_dataset(dataset_path: str):
         return load_dataset("text", data_files=expanded_path)
 
 
-def _process_shakespeare_text(sample: dict[str, Any]) -> str:
+def _process_text(sample: dict[str, Any]) -> str:
     return sample["text"]
 
 
@@ -68,7 +68,17 @@ DATASETS = {
     "shakespeare": DatasetConfig(
         path="shakespeare",
         loader=_load_shakespeare_dataset,
-        sample_processor=_process_shakespeare_text,
+        sample_processor=_process_text,
+    ),
+    "dolma3_mix-6T_train": DatasetConfig(
+        path="allenai/dolma3_mix-6T",
+        loader=lambda path: load_dataset(path, split="train[0%:95%]"),
+        sample_processor=_process_text,
+    ),
+    "dolma3_mix-6T_validation": DatasetConfig(
+        path="allenai/dolma3_mix-6T",
+        loader=lambda path: load_dataset(path, split="train[95%:100%]"),
+        sample_processor=_process_text,
     ),
 }
 
