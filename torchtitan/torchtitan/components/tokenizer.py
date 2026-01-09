@@ -449,3 +449,51 @@ def build_hf_tokenizer(
 
 def build_gpt_tokenizer(job_config: JobConfig) -> GPTTokenizer:
     return GPTTokenizer(job_config.model.tokenizer_name)
+
+
+def build_auto_tokenizer(job_config: JobConfig) -> HuggingFaceTokenizer:
+    """
+    Download a pretrained tokenizer from Hugging Face Hub and wrap it as a
+    `HuggingFaceTokenizer`.
+
+    Args:
+        model_name: Hugging Face model id (e.g., "meta-llama/Llama-3.1-8B").
+
+    Returns:
+        HuggingFaceTokenizer loaded from the downloaded tokenizer assets.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as e:  # pragma: no cover - informative failure path
+        raise ImportError(
+            "huggingface_hub is required to download tokenizers from Hugging Face. "
+            "Install with `pip install huggingface_hub`."
+        ) from e
+
+    model_name = job_config.model.tokenizer_name
+    if model_name is None:
+        raise ValueError("Tokenizer name is not set")
+
+    logger.info(f"Downloading tokenizer for '{model_name}' from Hugging Face Hub")
+
+    allow_patterns = [
+        "tokenizer.json",
+        "tokenizer.model",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "added_tokens.json",
+        "added_tokens_decoder.json",
+        "vocab.json",
+        "vocab.txt",
+        "merges.txt",
+        "spiece.model",
+        "sentencepiece.bpe.model",
+    ]
+
+    local_dir = snapshot_download(
+        repo_id=model_name,
+        allow_patterns=allow_patterns,
+        local_dir_use_symlinks=False,
+    )
+
+    return HuggingFaceTokenizer(local_dir)
