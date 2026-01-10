@@ -506,7 +506,7 @@ class CodexGroupedExperts(GroupedExperts):
 
 class CodexFeedForward(FeedForward):
     def __init__(
-        self, dim, hidden_dim, ffn_scale: float = 1.0, model_args: CodexModelArgs = None
+        self, dim, hidden_dim, ffn_scale: float = 1.0, model_args = None
     ):
         super().__init__(dim, hidden_dim)
         self.ffn_scale = float(ffn_scale)
@@ -913,14 +913,14 @@ class Codex(nn.Module):
             self.norm.reset_parameters()
 
         # TODO: Confirm if this is correct cause we are using tied weights
-        if model_args.use_spectral_norm:
+        if self.model_args.use_spectral_norm:
             self.output_scale = spectral_scale(
-                model_args.init_std, model_args.d_model, model_args.vocab_size
+                self.model_args.init_std, self.model_args.d_model, self.model_args.vocab_size
             )
-        elif model_args.use_mup:
-            self.output_scale = model_args.init_std * model_args.mup_multiplier**-0.5
+        elif self.model_args.use_mup:
+            self.output_scale = self.model_args.init_std * self.model_args.mup_multiplier**-0.5
         else:
-            self.output_scale = model_args.init_std
+            self.output_scale = self.model_args.init_std
         nn.init.normal_(self.output.weight, mean=0.0, std=self.output_scale)
         # TODO: confirm if this is correct, also we are using tied weights
         # final_out_std = self.model_args.d_model**-0.5

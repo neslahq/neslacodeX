@@ -1,6 +1,6 @@
 # Copied from the torchtitan pull request: https://github.com/pytorch/torchtitan/pull/1630/files#
 
-from .abstract_disco import AbstractDisco
+from .abstract_disco import AbstractDiSCO
 from .disco import Disco
 from .utils import (
     create_disco_optimizer_kwargs_from_optimizer_config,
