@@ -98,6 +98,7 @@ class Validator(BaseValidator):
         device_type = utils.device_type
 
         num_steps = 0
+        tokens_seen = 0
 
         validation_steps = 0
 
@@ -121,7 +122,9 @@ class Validator(BaseValidator):
             if validation_steps != -1 and num_steps >= validation_steps:
                 break
 
-            self.metrics_processor.ntokens_since_last_log += labels.numel()
+            labels_count = labels.numel()
+            self.metrics_processor.ntokens_since_last_log += labels_count
+            tokens_seen += labels_count
             for k, v in input_dict.items():
                 input_dict[k] = v.to(device_type)
             inputs = input_dict["input"]
@@ -188,7 +191,19 @@ class Validator(BaseValidator):
         else:
             global_avg_loss = loss.item()
 
-        self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
+        tokens_tensor = torch.tensor(
+            tokens_seen, dtype=torch.float64, device=utils.device_type
+        )
+        if parallel_dims.dp_cp_enabled:
+            total_tokens = dist_utils.dist_sum(
+                tokens_tensor, parallel_dims.world_mesh["dp_cp"]
+            )
+        else:
+            total_tokens = tokens_tensor.item()
+
+        self.metrics_processor.log_validation(
+            loss=global_avg_loss, step=step, tokens_seen=total_tokens
+        )
 
         # Set model back to train mode
         for model in model_parts:

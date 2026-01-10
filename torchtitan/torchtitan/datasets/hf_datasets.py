@@ -44,6 +44,21 @@ def _load_shakespeare_dataset(dataset_path: str):
         return load_dataset("text", data_files=expanded_path)
 
 
+class DolmaDataset():
+    shuffled_dataset = None 
+
+    @classmethod
+    def _load_dataset(dataset_path: str, split: str):
+        if self.shuffled_dataset is None:
+            self.shuffled_dataset = load_dataset(dataset_path, split="train", streaming=True).shuffle(seed=42)
+        
+        if split == "train":
+            return self.shuffled_dataset.skip(1000)
+        elif split == "validation":
+            return self.shuffled_dataset.take(1000)
+        else:
+            raise ValueError(f"Invalid split: {split}")
+
 def _process_text(sample: dict[str, Any]) -> str:
     return sample["text"]
 
@@ -73,13 +88,14 @@ DATASETS = {
     "dolma3_mix-6t_train": DatasetConfig(
         path="allenai/dolma3_mix-6T",
         # loader=lambda path: load_dataset(path, split="train[0%:0.1%]", streaming=True),
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        # loader=lambda path: load_dataset(path, split="train", streaming=True),
+        loader=partial(DolmaDataset._load_dataset, split="train"),
         sample_processor=_process_text,
     ),
     "dolma3_mix-6t_validation": DatasetConfig(
         path="allenai/dolma3_mix-6T",
         # loader=lambda path: load_dataset(path, split="train[99%:100%]", streaming=True),
-        loader=lambda path: load_dataset(path, split="train", streaming=True),
+        loader=partial(DolmaDataset._load_dataset, split="validation"),
         sample_processor=_process_text,
     ),
 }
@@ -118,7 +134,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         path, dataset_loader, text_processor = _validate_dataset(
             dataset_name, dataset_path
         )
-        ds = dataset_loader(path).take(1000)
+        ds = dataset_loader(path)
 
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(
