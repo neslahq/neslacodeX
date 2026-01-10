@@ -205,10 +205,10 @@ class Training:
     steps: int = 10000
     """How many train steps to run"""
 
-    target_flops: int = 0
+    target_flops: float = 0.0
     """Target flops to reach"""
 
-    target_param_data_ratio: float = 0
+    target_param_data_ratio: float = 0.0
     """Target parameter-data ratio to reach"""
 
     enable_cpu_offload: bool = False
@@ -775,8 +775,8 @@ class Validation:
 
     def __post_init__(self):
         assert (
-            self.steps > 0 or self.steps == -1
-        ), "validation steps must be positive or -1"
+            self.steps > 0 or self.steps == -1 or self.val_tokens > 0
+        ), "validation steps must be positive or -1 or val_tokens must be positive"
 
 
 @dataclass

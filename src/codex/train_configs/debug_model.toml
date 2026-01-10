@@ -30,14 +30,14 @@ weight_decay = 0.1
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 2  # lr scheduler warm up
+warmup_steps = 0  # lr scheduler warm up
 
 [training]
 local_batch_size = 4
 seq_len = 1024
 max_norm = 1.0  # grad norm clipping
 steps = 0
-target_flops = 0
+target_flops = 0.0
 target_param_data_ratio = 0
 dataset = "dolma3_mix-6T_train"
 dataset_path = ""
@@ -79,6 +79,8 @@ enable = true
 dataset = "dolma3_mix-6T_validation"
 freq = 250
 val_tokens = 52428800
+local_batch_size = 4
+seq_len = 1024
 steps = 0 # Recommend value for c4_validation with world-size=8 and seq_len=8192
 
 [sweep]

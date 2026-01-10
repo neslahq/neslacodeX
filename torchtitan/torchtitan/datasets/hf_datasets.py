@@ -70,14 +70,16 @@ DATASETS = {
         loader=_load_shakespeare_dataset,
         sample_processor=_process_text,
     ),
-    "dolma3_mix-6T_train": DatasetConfig(
+    "dolma3_mix-6t_train": DatasetConfig(
         path="allenai/dolma3_mix-6T",
-        loader=lambda path: load_dataset(path, split="train[0%:95%]"),
+        # loader=lambda path: load_dataset(path, split="train[0%:0.1%]", streaming=True),
+        loader=lambda path: load_dataset(path, split="train", streaming=True),
         sample_processor=_process_text,
     ),
-    "dolma3_mix-6T_validation": DatasetConfig(
+    "dolma3_mix-6t_validation": DatasetConfig(
         path="allenai/dolma3_mix-6T",
-        loader=lambda path: load_dataset(path, split="train[95%:100%]"),
+        # loader=lambda path: load_dataset(path, split="train[99%:100%]", streaming=True),
+        loader=lambda path: load_dataset(path, split="train", streaming=True),
         sample_processor=_process_text,
     ),
 }
@@ -116,7 +118,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         path, dataset_loader, text_processor = _validate_dataset(
             dataset_name, dataset_path
         )
-        ds = dataset_loader(path)
+        ds = dataset_loader(path).take(1000)
 
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(
@@ -211,6 +213,8 @@ def build_hf_dataloader(
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
+
+    logger.info(f"Building data loader for dataset {dataset_name} with batch size {batch_size}, sequence length {seq_len}")
 
     hf_ds = HuggingFaceDataset(
         dataset_name=dataset_name,

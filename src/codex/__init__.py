@@ -49,7 +49,7 @@ codex_configs = {
         ),
         mscale=0.70,
         use_mup=False,
-        use_spectral_norm=True,
+        use_spectral_norm=False,
         use_residual_scaling=True,
         g=1,
         use_gelu=True,

@@ -16,7 +16,7 @@ ENV TORCH_USE_CUDA_DSA=1
 
 # Install PyTorch, Torchvision, Torchaudio with CUDA 12.8 support, and Transformers
 RUN pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.9.* torchvision torchaudio && \
-python3.11 -m pip install transformers==4.34.0
+python3.11 -m pip install transformers>=4.45.0
 
 # Install NVSHMEM for DEEPEP
 RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
@@ -51,9 +51,8 @@ RUN git clone https://github.com/deepseek-ai/DeepEP.git /opt/DeepEP && \
     cd / && rm -rf /opt/DeepEP
 
 # Add project environment variables
-ENV WANDB_TEAM=tinuade
-ENV WANDB_PROJECT=codex-mup-codecheck
-ENV WANDB_RUN_NAME=codex-mup-codecheck
+ENV WANDB_TEAM=nesla-lab
+ENV WANDB_PROJECT=neslacodex-scaling-laws
 
 # Copy and install Python requirements
 COPY requirements.txt /tmp/requirements.txt

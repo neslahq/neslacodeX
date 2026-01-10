@@ -15,10 +15,11 @@ CUSTOM_IMPORT="src.scripts.override_model_config"
 
 FLOPS_BUDGETS=(
     1e18
-    3e18
-    6e18
+    # 3e18
+    # 6e18
 )
-DEPTHS=(10 12 14 16 18 20)
+DEPTHS=(10)
+# DEPTHS=(10 12 14 16 18 20)
 WANDB_RUN="${WANDB_RUN:-scaling}"
 
 # export OMP_NUM_THREADS=1
@@ -98,7 +99,7 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
         WANDB_RUN_NAME="${WANDB_RUN}_${TAG}" \
         CONFIG_FILE="${CONFIG_FILE}" \
         "${TRAIN_SCRIPT}" \
-        --target_flops=$flops \
+        --training.target_flops=$flops \
         --experimental.custom_import "${CUSTOM_IMPORT}" \
         "${EXTRA_ARGS[@]}" \
         2>&1 | tee "$RESULTS_DIR/${TAG}_train.log"

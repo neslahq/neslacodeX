@@ -245,6 +245,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             raise ValueError(
                 "Either steps, target_flops, or target_param_data_ratio must be set"
             )
+        logger.info(f"Training steps: {self.steps}")
 
         # register model hooks for activation logging here if enabled
         if self.job_config.training.log_activations:
@@ -430,7 +431,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
-            self.optimizers, job_config.lr_scheduler, job_config.training.steps
+            self.optimizers, job_config.lr_scheduler, self.steps
         )
         # Post optimizer step model converters hook.
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
@@ -509,7 +510,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"global batch size {global_batch_size}, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"sequence length {job_config.training.seq_len}, "
-            f"total steps {job_config.training.steps} "
+            f"total steps {self.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
@@ -854,7 +855,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     break
 
                 self.checkpointer.save(
-                    self.step, last_step=(self.step == job_config.training.steps)
+                    self.step, last_step=(self.step == self.steps)
                 )
 
                 # Run validation if validator is available

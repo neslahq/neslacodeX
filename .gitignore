@@ -40,6 +40,7 @@ dist/*
 data
 out
 wandb
+scaling_laws_results/
 
 torchtitan/torchtitan/datasets/**/*.model
 

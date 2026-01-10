@@ -101,13 +101,20 @@ class Validator(BaseValidator):
 
         validation_steps = 0
 
+        world_mesh = parallel_dims.world_mesh
+        if parallel_dims.dp_enabled:
+            dp_mesh = world_mesh["dp"]
+            dp_degree = dp_mesh.size()
+        else:
+            dp_degree = 1
+
         if self.job_config.validation.steps > 0:
             validation_steps = self.job_config.validation.steps
         elif self.job_config.validation.val_tokens > 0:
             validation_steps = self.job_config.validation.val_tokens // (
                 self.job_config.validation.local_batch_size
                 * self.job_config.validation.seq_len
-                * self.parallel_dims.dp_world_size
+                * dp_degree
             )
 
         for input_dict, labels in self.validation_dataloader:
