@@ -245,7 +245,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             raise ValueError(
                 "Either steps, target_flops, or target_param_data_ratio must be set"
             )
-        logger.info(f"Training steps: {self.steps}")
+        logger.info(f"Training steps: {self.steps} total batch size tokens: {self.total_batch_size_tokens} flops per batch: {self.flops_per_batch}")
 
         # register model hooks for activation logging here if enabled
         if self.job_config.training.log_activations:
@@ -845,6 +845,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ):
             data_iterator = self.batch_generator(self.dataloader)
             min_val_loss = math.inf
+            val_loss: float | None = None
             while self.should_continue_training():
                 self.step += 1
                 self.gc_handler.run(self.step)
@@ -921,8 +922,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
             logger.info(f"DDP world size: {torch.distributed.get_world_size()}")
             logger.info("Training outcomes:")
-            logger.info(f"Minimum validation loss: {min_val_loss}")
-            logger.info(f"Final validation loss: {val_loss}")
+            if math.isinf(min_val_loss):
+                logger.info("Minimum validation loss: n/a (validation never ran)")
+            else:
+                logger.info(f"Minimum validation loss: {min_val_loss}")
+
+            if val_loss is None:
+                logger.info("Final validation loss: n/a (validation never ran)")
+            else:
+                logger.info(f"Final validation loss: {val_loss}")
             logger.info(f"Total training flops: {self.flops_per_batch * self.steps:e}")
             logger.info(f"Total training time: {total_training_time/60:.2f}m")
         logger.info("Training completed")

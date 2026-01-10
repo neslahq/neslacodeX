@@ -44,20 +44,32 @@ def _load_shakespeare_dataset(dataset_path: str):
         return load_dataset("text", data_files=expanded_path)
 
 
-class DolmaDataset():
-    shuffled_dataset = None 
+class DolmaDataset:
+    shuffled_dataset = None
 
     @classmethod
-    def _load_dataset(dataset_path: str, split: str):
-        if self.shuffled_dataset is None:
-            self.shuffled_dataset = load_dataset(dataset_path, split="train", streaming=True).shuffle(seed=42)
-        
+    def _load_dataset(cls, dataset_path: str, split: str):
+        """
+        Load and cache the Dolma dataset once, then return a split-specific view.
+        """
+        if cls.shuffled_dataset is None:
+            # Use trust_remote_code to leverage the dataset's own loader (if any),
+            # and force a text-only schema to avoid JSON column type drift
+            # (some shards have bool/number inconsistencies in metadata fields).
+            base_ds = load_dataset(
+                dataset_path,
+                split="train",
+                streaming=True
+            )
+            # Select only the text column to avoid schema mismatches in metadata
+            # base_ds = base_ds.select_columns(["text"])
+            cls.shuffled_dataset = base_ds.shuffle(seed=42)
+
         if split == "train":
-            return self.shuffled_dataset.skip(1000)
-        elif split == "validation":
-            return self.shuffled_dataset.take(1000)
-        else:
-            raise ValueError(f"Invalid split: {split}")
+            return cls.shuffled_dataset.skip(50000)
+        if split == "validation":
+            return cls.shuffled_dataset.take(50000)
+        raise ValueError(f"Invalid split: {split}")
 
 def _process_text(sample: dict[str, Any]) -> str:
     return sample["text"]
@@ -86,14 +98,16 @@ DATASETS = {
         sample_processor=_process_text,
     ),
     "dolma3_mix-6t_train": DatasetConfig(
-        path="allenai/dolma3_mix-6T",
+        # path="allenai/dolma3_mix-6T",
+        path="allenai/dolma3_mix-150B-1025",
         # loader=lambda path: load_dataset(path, split="train[0%:0.1%]", streaming=True),
         # loader=lambda path: load_dataset(path, split="train", streaming=True),
         loader=partial(DolmaDataset._load_dataset, split="train"),
         sample_processor=_process_text,
     ),
     "dolma3_mix-6t_validation": DatasetConfig(
-        path="allenai/dolma3_mix-6T",
+        # path="allenai/dolma3_mix-6T",
+        path="allenai/dolma3_mix-150B-1025",
         # loader=lambda path: load_dataset(path, split="train[99%:100%]", streaming=True),
         loader=partial(DolmaDataset._load_dataset, split="validation"),
         sample_processor=_process_text,
@@ -158,7 +172,38 @@ class HuggingFaceDataset(IterableDataset, Stateful):
             else:
                 return iter(self._data.skip(self._sample_idx))
 
-        return iter(self._data)
+        return self._resilient_iter(self._data)
+
+    def _resilient_iter(self, data):
+        """Wrap iteration to skip shards with schema drift (ArrowInvalid errors)."""
+        iterator = iter(data)
+        consecutive_errors = 0
+        max_consecutive_errors = 100  # bail out if too many consecutive failures
+        while True:
+            try:
+                sample = next(iterator)
+                consecutive_errors = 0  # reset on success
+                yield sample
+            except StopIteration:
+                break
+            except Exception as e:
+                # Catch pyarrow.lib.ArrowInvalid and similar schema errors
+                error_name = type(e).__name__
+                if "Arrow" in error_name or "JSON" in str(e):
+                    consecutive_errors += 1
+                    if consecutive_errors == 1:
+                        logger.warning(
+                            f"Skipping shard due to schema error ({error_name}): {e}"
+                        )
+                    if consecutive_errors >= max_consecutive_errors:
+                        logger.error(
+                            f"Too many consecutive errors ({consecutive_errors}), stopping."
+                        )
+                        raise
+                    # Continue to next sample/shard
+                    continue
+                else:
+                    raise
 
     def __iter__(self):
         max_buffer_token_len = 1 + self.seq_len

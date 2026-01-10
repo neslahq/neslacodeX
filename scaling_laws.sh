@@ -14,7 +14,7 @@ EXTRA_ARGS=("$@")
 CUSTOM_IMPORT="src.scripts.override_model_config"
 
 FLOPS_BUDGETS=(
-    1e18
+    1e16
     # 3e18
     # 6e18
 )
@@ -32,7 +32,7 @@ RESULTS_FILE="$RESULTS_DIR/results.csv"
 
 # Write CSV header only if file doesn't exist
 if [ ! -f "$RESULTS_FILE" ]; then
-    echo "flops_budget,depth,model_dim,num_params,num_scaling_params,num_iterations,tokens_trained,param_data_ratio,val_loss,train_time_sec" > "$RESULTS_FILE"
+    echo "flops_budget,depth,model_dim,num_scaling_params,num_iterations,tokens_trained,param_data_ratio,val_loss,train_time_sec" > "$RESULTS_FILE"
 fi
 
 log() {
@@ -79,22 +79,8 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
         # Record start time
         START_TIME=$(date +%s)
 
-        # Train the model with fixed flops budget
-        # The script will auto-calculate num_iterations to hit target_flops
-        # CORE eval happens once at the end (999999 ensures only final step)
-        # torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- \
-        #     --depth=$d \
-        #     --target_flops=$flops \
-        #     --target_param_data_ratio=-1 \
-        #     --run="${WANDB_RUN}_${TAG}" \
-        #     --model_tag="${TAG}" \
-        #     --eval_tokens=$EVAL_TOKENS \
-        #     --core_metric_every=999999 \
-        #     --core_metric_max_per_task=-1 \
-        #     --sample_every=-1 \
-        #     --save_every=-1 \
-        #     2>&1 | tee "$RESULTS_DIR/${TAG}_train.log"
-
+        # Run training, capture exit code (don't exit script on failure)
+        set +e
         CODEX_DEPTH="${d}" \
         WANDB_RUN_NAME="${WANDB_RUN}_${TAG}" \
         CONFIG_FILE="${CONFIG_FILE}" \
@@ -103,24 +89,38 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
         --experimental.custom_import "${CUSTOM_IMPORT}" \
         "${EXTRA_ARGS[@]}" \
         2>&1 | tee "$RESULTS_DIR/${TAG}_train.log"
-
+        TRAIN_EXIT_CODE=${PIPESTATUS[0]}
+        set -e
 
         END_TIME=$(date +%s)
         TRAIN_TIME=$((END_TIME - START_TIME))
 
-        # Extract training stats from the log
+        if [ "$TRAIN_EXIT_CODE" -ne 0 ]; then
+            log "WARNING: Training exited with code $TRAIN_EXIT_CODE, attempting to extract partial results..."
+        fi
+
+        # Extract training stats from the log (with fallbacks for missing values)
         LOG_FILE="$RESULTS_DIR/${TAG}_train.log"
-        NUM_PARAMS=$(grep "Number of parameters:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | head -1 | tr -d ',')
-        NUM_SCALING_PARAMS=$(grep "Number of parameters:" "$LOG_FILE" | tail -1 | grep -oP 'scaling: [\d,]+' | grep -oP '[\d,]+' | tr -d ',')
-        NUM_ITERS=$(grep "Calculated number of iterations" "$LOG_FILE" | tail -1 | sed 's/.*: //' | tr -d ',')
-        # Calculate tokens trained (iterations * batch_size, default 524288)
-        TOKENS_TRAINED=$(grep "Number of training tokens:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | head -1 | tr -d ',')
+        # Use sed to extract the number after the specific label
+        NUM_SCALING_PARAMS=$(grep "Number of parameters:" "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/.*Number of parameters: //' | grep -oP '^\d+' || echo "0")
+        # # Try to get scaling params, fall back to total params if not available
+        # NUM_SCALING_PARAMS=$(grep "Number of parameters:" "$LOG_FILE" 2>/dev/null | tail -1 | grep -oP 'scaling \d+' | grep -oP '\d+' || echo "")
+        # if [ -z "$NUM_SCALING_PARAMS" ]; then
+        #     NUM_SCALING_PARAMS="$NUM_PARAMS"
+        # fi
+        NUM_ITERS=$(grep "Calculated number of iterations:" "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/.*Calculated number of iterations: //' | grep -oP '^\d+' || echo "0")
+        # Calculate tokens trained
+        TOKENS_TRAINED=$(grep "Number of training tokens:" "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/.*Number of training tokens: //' | grep -oP '^\d+' || echo "0")
         # Param:data ratio (using scaling params per Kaplan et al.)
-        PARAM_DATA_RATIO=$(python -c "print(f'{$TOKENS_TRAINED / $NUM_SCALING_PARAMS:.2f}')")
+        if [ "$NUM_SCALING_PARAMS" != "0" ] && [ "$TOKENS_TRAINED" != "0" ]; then
+            PARAM_DATA_RATIO=$(python3 -c "print(f'{$TOKENS_TRAINED / $NUM_SCALING_PARAMS:.2f}')")
+        else
+            PARAM_DATA_RATIO="N/A"
+        fi
         # Model dim
         MODEL_DIM=$((d * 64))
         # Val BPB from final eval
-        VAL_LOSS=$(grep "Final validation loss:" "$LOG_FILE" | tail -1 | grep -oP '[\d.]+$')
+        VAL_LOSS=$(grep "Final validation loss:" "$LOG_FILE" 2>/dev/null | tail -1 | grep -oP '[\d.]+$' || echo "N/A")
 
         # Extract CORE score from training log (evaluated on final step)
         # CORE_SCORE=$(grep "CORE metric:" "$LOG_FILE" | tail -1 | awk '{print $NF}')
@@ -129,10 +129,22 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
         #     CORE_SCORE="0.0"
         # fi
 
-        log "  Params: $NUM_PARAMS, Iters: $NUM_ITERS, Ratio: $PARAM_DATA_RATIO, Val Loss: $VAL_LOSS"
+        # Handle empty values
+        # NUM_PARAMS="${NUM_PARAMS:-0}"
+        NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-0}"
+        NUM_ITERS="${NUM_ITERS:-0}"
+        TOKENS_TRAINED="${TOKENS_TRAINED:-0}"
+        VAL_LOSS="${VAL_LOSS:-N/A}"
+
+        log "  Scaling Params: $NUM_SCALING_PARAMS, Iters: $NUM_ITERS, Ratio: $PARAM_DATA_RATIO, Val Loss: $VAL_LOSS"
+
+        if [ "$TRAIN_EXIT_CODE" -ne 0 ] && [ "$VAL_LOSS" = "N/A" ]; then
+            log "WARNING: Training failed and no validation loss found, skipping CSV entry"
+            continue
+        fi
 
         # Append to CSV
-        echo "$flops,$d,$MODEL_DIM,$NUM_PARAMS,$NUM_SCALING_PARAMS,$NUM_ITERS,$TOKENS_TRAINED,$PARAM_DATA_RATIO,$VAL_LOSS,$TRAIN_TIME" >> "$RESULTS_FILE"
+        echo "$flops,$d,$MODEL_DIM,$NUM_SCALING_PARAMS,$NUM_ITERS,$TOKENS_TRAINED,$PARAM_DATA_RATIO,$VAL_LOSS,$TRAIN_TIME" >> "$RESULTS_FILE"
     done
 done
 
