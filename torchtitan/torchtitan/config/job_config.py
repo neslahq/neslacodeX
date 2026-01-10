@@ -205,6 +205,12 @@ class Training:
     steps: int = 10000
     """How many train steps to run"""
 
+    target_flops: int = 0
+    """Target flops to reach"""
+
+    target_param_data_ratio: float = 0
+    """Target parameter-data ratio to reach"""
+
     enable_cpu_offload: bool = False
     """
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
@@ -763,6 +769,9 @@ class Validation:
     Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset
     WARNING: When setting to -1 there could be hangs due to mismatch among ranks
     """
+
+    val_tokens: int = 0
+    """Number of tokens to validate"""
 
     def __post_init__(self):
         assert (

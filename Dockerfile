@@ -63,10 +63,10 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
 # Download eval dataset
-RUN curl -L -o eval_bundle.zip https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip
-RUN unzip -q eval_bundle.zip
-RUN rm eval_bundle.zip
-RUN mv eval_bundle "$HOME/.cache/data"
+# RUN curl -L -o eval_bundle.zip https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip
+# RUN unzip -q eval_bundle.zip
+# RUN rm eval_bundle.zip
+# RUN mv eval_bundle "$HOME/.cache/data"
 
 # Default command to keep container alive (so we can exec into it or run commands)
 CMD ["sleep", "infinity"]

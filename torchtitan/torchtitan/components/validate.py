@@ -87,7 +87,7 @@ class Validator(BaseValidator):
         self,
         model_parts: list[nn.Module],
         step: int,
-    ) -> None:
+    ) -> float:
         # Set model to eval mode
         for model in model_parts:
             model.eval()
@@ -96,13 +96,22 @@ class Validator(BaseValidator):
 
         accumulated_losses = []
         device_type = utils.device_type
+
         num_steps = 0
 
+        validation_steps = 0
+
+        if self.job_config.validation.steps > 0:
+            validation_steps = self.job_config.validation.steps
+        elif self.job_config.validation.val_tokens > 0:
+            validation_steps = self.job_config.validation.val_tokens // (
+                self.job_config.validation.local_batch_size
+                * self.job_config.validation.seq_len
+                * self.parallel_dims.dp_world_size
+            )
+
         for input_dict, labels in self.validation_dataloader:
-            if (
-                self.job_config.validation.steps != -1
-                and num_steps >= self.job_config.validation.steps
-            ):
+            if validation_steps != -1 and num_steps >= validation_steps:
                 break
 
             self.metrics_processor.ntokens_since_last_log += labels.numel()
@@ -177,6 +186,8 @@ class Validator(BaseValidator):
         # Set model back to train mode
         for model in model_parts:
             model.train()
+
+        return global_avg_loss
 
 
 def build_validator(
