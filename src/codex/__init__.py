@@ -49,12 +49,12 @@ codex_configs = {
         ),
         mscale=0.70,
         use_mup=False,
+        use_spectral_norm=False,
         use_residual_scaling=True,
         g=1,
         use_gelu=True,
-        use_rope=True,
+        use_rope=False,
         use_mla=False,
-        ffn_scale=0.6159611964441745,
     ),
 }
 

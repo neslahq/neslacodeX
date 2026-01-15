@@ -52,8 +52,7 @@ RUN git clone https://github.com/deepseek-ai/DeepEP.git /opt/DeepEP && \
 
 # Add project environment variables
 ENV WANDB_TEAM=tinuade
-ENV WANDB_PROJECT=neslacodex-scion
-# ENV WANDB_RUN_NAME=neslacodex-scion
+ENV WANDB_PROJECT=neslacodex-scaling-laws
 
 # Copy and install Python requirements
 COPY requirements.txt /tmp/requirements.txt
@@ -61,6 +60,12 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Set Python3.11 as the default python
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Download eval dataset
+# RUN curl -L -o eval_bundle.zip https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip
+# RUN unzip -q eval_bundle.zip
+# RUN rm eval_bundle.zip
+# RUN mv eval_bundle "$HOME/.cache/data"
 
 # Default command to keep container alive (so we can exec into it or run commands)
 CMD ["sleep", "infinity"]

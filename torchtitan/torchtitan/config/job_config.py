@@ -226,6 +226,12 @@ class Training:
     steps: int = 10000
     """How many train steps to run"""
 
+    target_flops: float = 0.0
+    """Target flops to reach"""
+
+    target_param_data_ratio: float = 0.0
+    """Target parameter-data ratio to reach"""
+
     enable_cpu_offload: bool = False
     """
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
@@ -785,10 +791,13 @@ class Validation:
     WARNING: When setting to -1 there could be hangs due to mismatch among ranks
     """
 
+    val_tokens: int = 0
+    """Number of tokens to validate"""
+
     def __post_init__(self):
         assert (
-            self.steps > 0 or self.steps == -1
-        ), "validation steps must be positive or -1"
+            self.steps > 0 or self.steps == -1 or self.val_tokens > 0
+        ), "validation steps must be positive or -1 or val_tokens must be positive"
 
 
 @dataclass

@@ -102,7 +102,7 @@ def main():
         "--csv", type=Path, required=True, help="Path to mup_activations.csv"
     )
     parser.add_argument(
-        "--tag", type=str, required=True, help="plot tag"
+        "--tag", type=str, default="", help="plot tag"
     )
     parser.add_argument(
         "--out", type=Path, default=None, help="Output image path (png)"
@@ -114,7 +114,7 @@ def main():
 
     out_path = args.out
     if out_path is None:
-        out_path = args.csv.parent / f"{args.tag}_baseline_activations_rope_swiglu_mla.png"
+        out_path = args.csv.parent / f"{args.csv.stem}.png"
 
     steps, metrics = read_activation_csv(args.csv)
     if len(steps) == 0:

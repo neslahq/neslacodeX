@@ -87,7 +87,7 @@ class Validator(BaseValidator):
         self,
         model_parts: list[nn.Module],
         step: int,
-    ) -> None:
+    ) -> float:
         # Set model to eval mode
         for model in model_parts:
             model.eval()
@@ -96,16 +96,35 @@ class Validator(BaseValidator):
 
         accumulated_losses = []
         device_type = utils.device_type
+
         num_steps = 0
+        tokens_seen = 0
+
+        validation_steps = 0
+
+        world_mesh = parallel_dims.world_mesh
+        if parallel_dims.dp_enabled:
+            dp_mesh = world_mesh["dp"]
+            dp_degree = dp_mesh.size()
+        else:
+            dp_degree = 1
+
+        if self.job_config.validation.steps > 0:
+            validation_steps = self.job_config.validation.steps
+        elif self.job_config.validation.val_tokens > 0:
+            validation_steps = self.job_config.validation.val_tokens // (
+                self.job_config.validation.local_batch_size
+                * self.job_config.validation.seq_len
+                * dp_degree
+            )
 
         for input_dict, labels in self.validation_dataloader:
-            if (
-                self.job_config.validation.steps != -1
-                and num_steps >= self.job_config.validation.steps
-            ):
+            if validation_steps != -1 and num_steps >= validation_steps:
                 break
 
-            self.metrics_processor.ntokens_since_last_log += labels.numel()
+            labels_count = labels.numel()
+            self.metrics_processor.ntokens_since_last_log += labels_count
+            tokens_seen += labels_count
             for k, v in input_dict.items():
                 input_dict[k] = v.to(device_type)
             inputs = input_dict["input"]
@@ -172,11 +191,25 @@ class Validator(BaseValidator):
         else:
             global_avg_loss = loss.item()
 
-        self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
+        tokens_tensor = torch.tensor(
+            tokens_seen, dtype=torch.float64, device=utils.device_type
+        )
+        if parallel_dims.dp_cp_enabled:
+            total_tokens = dist_utils.dist_sum(
+                tokens_tensor, parallel_dims.world_mesh["dp_cp"]
+            )
+        else:
+            total_tokens = tokens_tensor.item()
+
+        self.metrics_processor.log_validation(
+            loss=global_avg_loss, step=step, tokens_seen=total_tokens
+        )
 
         # Set model back to train mode
         for model in model_parts:
             model.train()
+
+        return global_avg_loss
 
 
 def build_validator(

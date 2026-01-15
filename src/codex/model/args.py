@@ -56,6 +56,10 @@ class CodexModelArgs(BaseModelArgs):
     use_rope: bool = False
     max_batch_size: int = 8
     max_seq_len: int = 4096
+    use_aspect_ratio: bool = (
+        False  # use aspect ratio to control model size configurations based on n_layers.
+    )
+    aspect_ratio: int = 64
     d_model: int = 768
     inter_dim: int = 10944
     moe_inter_dim: int = 1408
@@ -67,7 +71,7 @@ class CodexModelArgs(BaseModelArgs):
     norm_eps: float = 1e-5  # eps used for RMSNorm
     init_std: float = 0.02
     p: int = 1
-    g: int = 3
+    g: int = 1
 
     # MUP
     use_mup: bool = False
@@ -110,16 +114,31 @@ class CodexModelArgs(BaseModelArgs):
     beta_slow: int = 1
     mscale: float = 1.0
 
+    def find_num_heads(self, d_model, target_head_dim):
+        # Find num_heads that divides d_model evenly, with head_dim closest to target.
+        ideal = max(1, round(d_model / target_head_dim))
+        for offset in range(d_model):
+            for candidate in [ideal + offset, ideal - offset]:
+                if candidate > 0 and d_model % candidate == 0:
+                    return candidate
+        return 1
+
     def _apply_dynamic_dims(self) -> None:
-        # Ensure attention head dimension is valid
-        assert (
-            self.d_model % self.n_heads == 0
-        ), f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})"
-        head_dim = self.d_model // self.n_heads
+
+        if self.use_aspect_ratio:
+            self.d_model = self.n_layers * self.aspect_ratio
+            self.n_heads = self.find_num_heads(self.d_model, self.v_head_dim)
+        else:
+            # Ensure attention head dimension is valid
+            assert (
+                self.d_model % self.n_heads == 0
+            ), f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})"
+            head_dim = self.d_model // self.n_heads
 
         # Feedforward hidden sizes (standard Transformer: 4x d_model)
         self.inter_dim = 4 * self.d_model
-        self.moe_inter_dim = max(self.moe_inter_dim, head_dim)  # keep sane minimum
+        # self.moe_inter_dim = max(self.moe_inter_dim, head_dim)  # keep sane minimum
+        self.moe_inter_dim = self.inter_dim // self.moe_args.num_experts
 
         if self.use_mup:
             self.mup_multiplier = self.d_model / self.mup_base_dim

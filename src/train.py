@@ -7,6 +7,7 @@
 import importlib
 import os
 import time
+import math
 from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
@@ -211,7 +212,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         logger.info(
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
         )
-
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
@@ -219,13 +219,41 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         with torch.device("meta"):
             model = self.train_spec.model_cls(model_args)
+
+        # set training steps
+        self.steps = 0
+        self.num_params, self.num_flops_per_token = model_args.get_nparams_and_flops(
+            model, job_config.training.seq_len
+        )
+        self.total_batch_size_tokens = (
+            job_config.training.local_batch_size
+            * job_config.training.seq_len
+            * dp_degree
+        )
+        self.flops_per_batch = self.num_flops_per_token * self.total_batch_size_tokens
+
+        if job_config.training.steps > 0:
+            self.steps = job_config.training.steps
+        elif job_config.training.target_flops > 0:
+            self.steps = round(job_config.training.target_flops / self.flops_per_batch)
+        elif job_config.training.target_param_data_ratio:
+            target_training_tokens = (
+                job_config.training.target_param_data_ratio * self.num_params
+            )
+            self.steps = target_training_tokens // self.total_batch_size_tokens
+        else:
+            raise ValueError(
+                "Either steps, target_flops, or target_param_data_ratio must be set"
+            )
+        logger.info(f"Training steps: {self.steps} total batch size tokens: {self.total_batch_size_tokens} flops per batch: {self.flops_per_batch}")
+
         # register model hooks for activation logging here if enabled
         if self.job_config.training.log_activations:
             # attn and mlp activation caches are of shape (n_steps, n_layers)
             # embedding and output activation caches are of shape (n_steps)
             # we store the mean activation value for each layer
             # we put the caches on the same device as the model to avoid data transfer overhead
-            s = self.job_config.training.steps
+            s = self.steps
             n = self.model_args.n_layers
             self.activation_cache = {
                 "embedding": torch.zeros((s,), device=self.device),
@@ -235,7 +263,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             }
             self.register_model_hooks(model)
             # Setup CSV logging for activation means (rank 0 only)
-            run = "mup" if self.model_args.use_mup else "sp"
+            run = "mup" if self.model_args.use_mup else "mup_sp" if self.model_args.use_spectral_norm else "sp"
             sweep_id = sweep_config.sweep_id if self.job_config.sweep.enable else ""
             run_id = sweep_config.run_id if self.job_config.sweep.enable else ""
 
@@ -251,12 +279,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.activation_log_file = (
                 (
                     self.activation_log_dir
-                    / f"{run}_activations_baseline_rope_swiglu_{sweep_id}_{run_id}.csv"
+                    / f"{run}_activations_baseline_spectral_{sweep_id}_{run_id}.csv"
                 )
                 if self.job_config.sweep.enable
                 else (
                     self.activation_log_dir
-                    / f"{run}_activations_baseline_rope_swiglu_mla.csv"
+                    / f"{run}_activations_baseline_spectral.csv"
                 )
             )
             if torch.distributed.get_rank() == 0:
@@ -381,7 +409,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             self.model_parts = [model]
             # Re-apply MuP lr_scale after parallelization to ensure attributes exist on final params
-            if self.model_args.use_mup:
+            if self.model_args.use_mup or self.model_args.use_spectral_norm:
                 self.set_mup_lr_scale(self.model_parts[0])
 
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
@@ -403,7 +431,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
-            self.optimizers, job_config.lr_scheduler, job_config.training.steps
+            self.optimizers, job_config.lr_scheduler, self.steps
         )
         # Post optimizer step model converters hook.
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
@@ -482,7 +510,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"global batch size {global_batch_size}, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"sequence length {job_config.training.seq_len}, "
-            f"total steps {job_config.training.steps} "
+            f"total steps {self.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
@@ -534,7 +562,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "c_proj.weight",
         ]
         if self.model_args.use_spectral_norm:
-            scale = lambda x: x.shape[1] / x.shape[0]
+            scale = lambda x: x.shape[0] / x.shape[1]
         elif self.model_args.use_mup:
             scale = lambda x: 1 / self.model_args.mup_multiplier
         else:
@@ -546,6 +574,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if p.dim() >= 2:
                 if any(name.endswith(param) for param in scalable_params):
                     p.lr_scale = scale(p)
+                    print(f"param shape: {p.shape}")
+                    print(f"Scaling {name} by {p.lr_scale}")
                 else:
                     p.lr_scale = 1.0
             else:
@@ -773,6 +803,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     @record
     def train(self):
         job_config = self.job_config
+        training_start_time = time.perf_counter()
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
@@ -813,6 +844,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ),
         ):
             data_iterator = self.batch_generator(self.dataloader)
+            min_val_loss = math.inf
+            val_loss: float | None = None
             while self.should_continue_training():
                 self.step += 1
                 self.gc_handler.run(self.step)
@@ -823,7 +856,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     break
 
                 self.checkpointer.save(
-                    self.step, last_step=(self.step == job_config.training.steps)
+                    self.step, last_step=(self.step == self.steps)
                 )
 
                 # Run validation if validator is available
@@ -831,7 +864,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     self.job_config.validation.enable
                     and self.validator.should_validate(self.step)
                 ):
-                    self.validator.validate(self.model_parts, self.step)
+                    val_loss = self.validator.validate(self.model_parts, self.step)
+                    min_val_loss = min(min_val_loss, val_loss)
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:
@@ -848,6 +882,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         ),
                         world_mesh=self.parallel_dims.world_mesh,
                     )
+
+        total_training_time = time.perf_counter() - training_start_time
 
         if torch.distributed.get_rank() == 0:
             logger.info("Sleeping 2 seconds for other ranks to complete")
@@ -872,10 +908,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     extra_metrics={"stability_score": stability_score},
                     sweep_log=True,
                 )
+
+            logger.info("==== Base model training ====")
+            logger.info("Training setup stats:")
+            logger.info(f"Number of parameters: {self.num_params}")
+            logger.info(f"Number of FLOPs per token: {self.num_flops_per_token:e}")
+            logger.info(f"Calculated number of iterations: {self.steps}")
+            logger.info(
+                f"Number of training tokens: {self.total_batch_size_tokens * self.steps}"
+            )
+            logger.info(
+                f"Tokens : Params ratio: {(self.total_batch_size_tokens * self.steps) / self.num_params}"
+            )
+            logger.info(f"DDP world size: {torch.distributed.get_world_size()}")
+            logger.info("Training outcomes:")
+            if math.isinf(min_val_loss):
+                logger.info("Minimum validation loss: n/a (validation never ran)")
+            else:
+                logger.info(f"Minimum validation loss: {min_val_loss}")
+
+            if val_loss is None:
+                logger.info("Final validation loss: n/a (validation never ran)")
+            else:
+                logger.info(f"Final validation loss: {val_loss}")
+            logger.info(f"Total training flops: {self.flops_per_batch * self.steps:e}")
+            logger.info(f"Total training time: {total_training_time/60:.2f}m")
         logger.info("Training completed")
 
     def should_continue_training(self) -> bool:
-        return self.step < self.job_config.training.steps
+        return self.step < self.steps
 
     def state_dict(self) -> dict[str, Any]:
         return {"step": self.step, "ntokens_seen": self.ntokens_seen}
