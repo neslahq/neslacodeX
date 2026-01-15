@@ -507,7 +507,7 @@ class CodexGroupedExperts(GroupedExperts):
 
 class CodexFeedForward(FeedForward):
     def __init__(
-        self, dim, hidden_dim, ffn_scale: float = 1.0, model_args: CodexModelArgs = None
+        self, dim, hidden_dim, ffn_scale: float = 1.0, model_args = None
     ):
         super().__init__(dim, hidden_dim)
         self.ffn_scale = float(ffn_scale)

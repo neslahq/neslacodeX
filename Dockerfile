@@ -51,7 +51,7 @@ RUN git clone https://github.com/deepseek-ai/DeepEP.git /opt/DeepEP && \
     cd / && rm -rf /opt/DeepEP
 
 # Add project environment variables
-ENV WANDB_TEAM=nesla-lab
+ENV WANDB_TEAM=tinuade
 ENV WANDB_PROJECT=neslacodex-scaling-laws
 
 # Copy and install Python requirements

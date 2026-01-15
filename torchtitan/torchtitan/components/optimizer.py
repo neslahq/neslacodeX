@@ -17,10 +17,10 @@ from torch.distributed.checkpoint.state_dict import (
 )
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
-
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments import distributed_scion
 
 __all__ = [
     "OptimizersContainer",
@@ -78,35 +78,46 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         # Collect all unique lr scales from model parameters.
         lr_scale_set: set[float] = set([1.0])
         for model in model_parts:
-            for p in model.parameters():
-                if not p.requires_grad:
-                    continue
-                scale = getattr(p, "lr_scale", None)
-                if scale is not None:
-                    lr_scale_set.add(float(scale))
-                all_params.append(p)
+            if issubclass(optimizer_cls, distributed_scion.Disco):
+                params, optimizer_kwargs = distributed_scion.create_disco_param_groups(
+                    model, optimizer_kwargs
+                )
+                self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
+                all_params.extend(params)
+            else:
+                # use lr_scale for maximal update parameterization when not using Scion
+                for p in model.parameters():
+                    if not p.requires_grad:
+                        continue
+                    scale = getattr(p, "lr_scale", None)
+                    if scale is not None:
+                        lr_scale_set.add(float(scale))
+                    all_params.append(p)
 
-        # Sort multipliers for stable param group ordering across all optimizers.
-        lr_scale_list = sorted(lr_scale_set)
-        # build per-model optimizers with identical param groups for each lr scale.
-        self.optimizers = []
-        for model in self.model_parts:
-            groups_by_scale: dict[float, list[nn.Parameter]] = {
-                s: [] for s in lr_scale_list
-            }
-            for p in model.parameters():
-                if not p.requires_grad:
-                    continue
-                scale = getattr(p, "lr_scale", 1.0)
-                groups_by_scale[scale].append(p)
+                # Sort multipliers for stable param group ordering across all optimizers.
+                lr_scale_list = sorted(lr_scale_set)
+                # build per-model optimizers with identical param groups for each lr scale.
+                self.optimizers = []
+                for model in self.model_parts:
+                    groups_by_scale: dict[float, list[nn.Parameter]] = {
+                        s: [] for s in lr_scale_list
+                    }
+                    for p in model.parameters():
+                        if not p.requires_grad:
+                            continue
+                        scale = getattr(p, "lr_scale", 1.0)
+                        groups_by_scale[scale].append(p)
 
-            # Always create one param group per lr scale in the same order,
-            # attach lr_scale metadata, but DO NOT override 'lr' here.
-            param_groups: list[dict[str, Any]] = []
-            for s in lr_scale_list:
-                params = groups_by_scale[s]
-                param_groups.append({"params": params, "lr_scale": s})
-            self.optimizers.append(optimizer_cls(param_groups, **optimizer_kwargs))
+                    # Always create one param group per lr scale in the same order,
+                    # attach lr_scale metadata, but DO NOT override 'lr' here.
+                    param_groups: list[dict[str, Any]] = []
+                    for s in lr_scale_list:
+                        params = groups_by_scale[s]
+                        param_groups.append({"params": params, "lr_scale": s})
+                    self.optimizers.append(
+                        optimizer_cls(param_groups, **optimizer_kwargs)
+                    )
+
         self._validate_length(len(self.model_parts))
         self._post_init(all_params, optimizer_kwargs)
 
@@ -356,10 +367,18 @@ def build_optimizers(
         "foreach": foreach,
     }
 
+    if name in ["DistributedScion"]:
+        optimizer_kwargs = (
+            distributed_scion.create_disco_optimizer_kwargs_from_optimizer_config(
+                optimizer_config, parallel_dims
+            )
+        )
+
     optimizer_classes = {
         "Adam": torch.optim.Adam,
         "AdamW": torch.optim.AdamW,
         "Muon": torch.optim.Muon,
+        "DistributedScion": distributed_scion.Disco,
     }
     if name not in optimizer_classes:
         raise NotImplementedError(f"Optimizer {name} not added.")

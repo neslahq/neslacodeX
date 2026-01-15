@@ -529,13 +529,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 if isinstance(output, tuple):
                     output = output[0]
                 if layer_name == "tok_embeddings":
-                    activation_cache["embedding"][step] = output.abs().mean()
+                    activation_cache["embedding"][step] = output.abs().mean().detach()
                 elif layer_name == "attn":
-                    activation_cache["attention"][step, layer_idx] = output.abs().mean()
+                    activation_cache["attention"][step, layer_idx] = output.abs().mean().detach()
                 elif layer_name == "mlp":
-                    activation_cache["mlp"][step, layer_idx] = output.abs().mean()
+                    activation_cache["mlp"][step, layer_idx] = output.abs().mean().detach()
                 elif layer_name == "output":
-                    activation_cache["output"][step] = output.abs().mean()
+                    activation_cache["output"][step] = output.abs().mean().detach()
 
             return hook_fn
 
