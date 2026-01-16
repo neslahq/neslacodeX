@@ -41,6 +41,7 @@ data
 out
 wandb
 scaling_laws_results/
+*_results/
 
 torchtitan/torchtitan/datasets/**/*.model
 

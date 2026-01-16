@@ -165,9 +165,9 @@ class Optimizer:
 
 @dataclass
 class LRScheduler:
-    warmup_steps: int = 200
+    warmup_ratio: float = 0.2
     """
-    Steps for lr scheduler warmup, normally 1/5 of --training.steps
+    Ratio of training steps for lr scheduler warmup, normally 20% of --training.steps
     """
 
     decay_ratio: float | None = None

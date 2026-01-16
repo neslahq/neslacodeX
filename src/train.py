@@ -511,7 +511,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"sequence length {job_config.training.seq_len}, "
             f"total steps {self.steps} "
-            f"(warmup {job_config.lr_scheduler.warmup_steps})"
+            f"(warmup ratio {job_config.lr_scheduler.warmup_ratio})"
         )
 
     def register_model_hooks(self, model: torch.nn.Module):

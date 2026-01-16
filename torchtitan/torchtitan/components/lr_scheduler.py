@@ -104,7 +104,7 @@ def build_lr_schedulers(
         lr_scheduler_config (LRSchedulerConfig): The lr scheduler config.
         training_steps (int): The total number of training steps.
     """
-    warmup_steps = int(lr_scheduler_config.warmup_steps)
+    warmup_steps = round(lr_scheduler_config.warmup_ratio * training_steps)
 
     if warmup_steps > training_steps:
         logger.warning(
