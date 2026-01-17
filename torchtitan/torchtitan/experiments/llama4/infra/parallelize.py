@@ -488,12 +488,14 @@ def apply_moe_ep_tp(
         elif tp_mesh is None:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = DeepExpertParallel()
+            # DeepExpertParallel uses deep_ep for optimized all-to-all
+            experts_plan = ExpertParallel()
         elif etp_enabled:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
         else:
             experts_mesh = ep_mesh
+            # DeepExpertParallel uses deep_ep for optimized all-to-all
             experts_plan = DeepExpertParallel()
 
         parallelize_module(

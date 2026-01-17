@@ -323,8 +323,8 @@ class MultiHeadLatentAttention(nn.Module):
 
         self.model_args = model_args
 
-    def init_weights(self, init_std, mup_multiplier, residual_scale):
-        mup_scale = mup_multiplier**-0.5
+    def init_weights(self, residual_scale):
+        # mup_scale = mup_multiplier**-0.5
 
         # Handle wq (Dense or LoRA)
         if self.q_lora_rank == 0:
@@ -343,7 +343,7 @@ class MultiHeadLatentAttention(nn.Module):
 
         # wkv_b: Up projection (r -> d_out). Input is normalized. Scale by 1/sqrt(r)
         # scale_b = init_std * (self.kv_lora_rank**-0.5)
-        scale_b = init_std * mup_scale
+        # scale_b = init_std * mup_scale
         nn.init.normal_(self.wkv_b.weight, mean=0.0, std=self.wkv_b_scale)
         self.kv_norm.reset_parameters()
 
@@ -495,6 +495,93 @@ class CodexGroupedExperts(GroupedExperts):
             self.w1_scale = model_args.init_std
             self.w2_scale = model_args.init_std
             self.w3_scale = model_args.init_std
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass for grouped experts.
+        
+        For DeepExpertParallel: The input_fn hook intercepts (x, num_tokens_per_expert, topk_idx, topk_weights)
+        and dispatches tokens. This forward() then receives the dispatched tokens.
+        
+        For non-parallel mode: We handle token expansion here.
+        
+        Args:
+            x: Input tokens (bs*slen, dim) for DeepEP mode, or dispatched tokens for parallel mode
+            num_tokens_per_expert: Token counts per expert
+            topk_idx: Expert indices (bs*slen, top_k)
+            topk_weights: Expert weights (bs*slen, top_k), optional
+            
+        Returns:
+            (output, topk_idx): Output tensor and the indices used for scattering
+        """
+        from torch.distributed.tensor import DTensor
+        
+        # Check if EP is active by checking if weights are DTensors (sharded across EP ranks)
+        is_ep_mode = isinstance(self.w1, DTensor)
+        
+        if not is_ep_mode:
+            # Non-EP mode: expand tokens by gathering based on topk_idx
+            dim = x.size(-1)
+            token_indices = topk_idx.reshape(-1, 1).expand(-1, dim)
+            expanded_x = torch.gather(x, dim=0, index=token_indices)
+            output = super().forward(expanded_x, num_tokens_per_expert)
+            return output, topk_idx
+        else:
+            # EP mode: tokens already dispatched
+            # DeepEP returns num_tokens_per_expert with shape [num_local_experts]
+            # but @expert_parallel expects [num_local_experts * ep_degree]
+            # So we run expert computation directly here
+            output = self._run_experts_ep(x, num_tokens_per_expert)
+            return output, topk_idx
+    
+    def _run_experts_ep(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        """Run expert computation for EP mode using for-loop (simpler, more robust)."""
+        from torch.distributed.tensor import DTensor
+        import torch.nn.functional as F
+        
+        # Get local weights from DTensors
+        w1 = self.w1.to_local() if isinstance(self.w1, DTensor) else self.w1
+        w2 = self.w2.to_local() if isinstance(self.w2, DTensor) else self.w2
+        w3 = self.w3.to_local() if isinstance(self.w3, DTensor) else self.w3
+        
+        num_local_experts = w1.shape[0]
+        
+        # Sum up tokens per expert across all source ranks if multi-rank format
+        if num_tokens_per_expert.shape[0] > num_local_experts:
+            num_ranks = num_tokens_per_expert.shape[0] // num_local_experts
+            # Sum tokens from all ranks for each expert
+            tokens_per_local_expert = num_tokens_per_expert.view(num_ranks, num_local_experts).sum(0)
+        else:
+            tokens_per_local_expert = num_tokens_per_expert
+        
+        # Convert to list for splitting (incurs sync but simple and robust)
+        tokens_per_expert_list = tokens_per_local_expert.tolist()
+        
+        # Split input by expert
+        x_splits = torch.split(x, tokens_per_expert_list, dim=0)
+        
+        out_experts_splits = []
+        for expert_idx in range(num_local_experts):
+            expert_x = x_splits[expert_idx]
+            if expert_x.shape[0] == 0:
+                # No tokens for this expert
+                out_experts_splits.append(expert_x.new_empty((0, w2.shape[1])))
+                continue
+            
+            # w1: [num_experts, hidden_dim, dim], w2: [num_experts, dim, hidden_dim], w3: [num_experts, hidden_dim, dim]
+            h = F.silu(torch.matmul(expert_x, w1[expert_idx].transpose(-2, -1)))
+            h = h * torch.matmul(expert_x, w3[expert_idx].transpose(-2, -1))
+            h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
+            out_experts_splits.append(h)
+        
+        out = torch.cat(out_experts_splits, dim=0)
+        return out
 
     def init_weights(self, residual_scale):
 
@@ -659,6 +746,7 @@ class CodexMoE(nn.Module):
                 dim=dim,
                 hidden_dim=hidden_dim * moe_args.num_shared_experts,
                 ffn_scale=model_args.ffn_scale,
+                model_args=model_args,
             )
             if moe_args.num_shared_experts > 0
             else None
@@ -734,24 +822,17 @@ class CodexMoE(nn.Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # NOTE: We do not really need to sort the tokens by experts here since we are using DeepExpertParallel and this uses a different all-to-all implementation that does not require sorting the tokens by experts.
-        # However the tokens on each local rank needs to sorted after all-to-all communication(taken care of by DeepExpertParallel) to be able to use grouped mm.
+        # NOTE: For DeepExpertParallel, we pass the ORIGINAL x (not expanded) along with topk_idx.
+        # DeepEP handles the token dispatch/expansion internally.
+        # For non-parallel (single GPU) or ExpertParallel, we need to handle expansion ourselves.
+        
+        # Pass original x, topk_idx, and weights to experts
+        # DeepExpertParallel will handle dispatch; non-parallel mode will handle expansion in forward
+        routed_output, output_topk_idx = self.experts(
+            x, num_tokens_per_expert, selected_experts_indices, top_scores
+        )
 
-        # shape (bs*slen*top_k, dim)
-        token_indices = selected_experts_indices.reshape(-1, 1).expand(-1, dim)
-
-        # shape (bs*slen*top_k, dim)
-        routed_input = torch.gather(x, dim=0, index=token_indices)
-
-        if self.score_before_experts:
-            routed_input = (
-                routed_input.to(torch.float32) * top_scores.reshape(-1, 1)
-            ).to(x.dtype)
-
-        # shape (bs*slen*top_k, dim)
-        # TODO: I'm not sure num_tokens_per_expert is properly calibrated here.
-        routed_output = self.experts(routed_input, num_tokens_per_expert)
-
+        # Apply scores if not done before experts
         if not self.score_before_experts:
             routed_output = (
                 routed_output.to(torch.float32) * top_scores.reshape(-1, 1)
@@ -763,6 +844,8 @@ class CodexMoE(nn.Module):
         else:
             out = torch.zeros_like(x)
 
+        # Scatter back using the topk indices
+        token_indices = output_topk_idx.reshape(-1, 1).expand(-1, dim)
         out = out.scatter_add(dim=0, index=token_indices, src=routed_output)
         out = out.reshape(bs, slen, dim)
         return out

@@ -330,7 +330,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             buffer_device = device_type
         else:
             init_device = device_type
-            buffer_device = None
+            buffer_device = device_type
 
         self.loss_fn = self.train_spec.build_loss_fn(job_config)
 

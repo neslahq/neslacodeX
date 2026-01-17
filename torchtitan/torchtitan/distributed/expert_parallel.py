@@ -99,55 +99,69 @@ class TensorParallel(ParallelStyle):
 
 
 class DeepExpertParallel(ParallelStyle):
+    """
+    Expert Parallel using deep_ep library for high-performance all-to-all communication.
+    
+    The input_fn and output_fn follow the distribute_module interface:
+    - input_fn(mod, inputs, device_mesh) -> transformed_inputs
+    - output_fn(mod, output, device_mesh) -> transformed_output
+    """
     def __init__(self):
         super().__init__()
+        self.handle = None
+        self.input_shape = None
+        self.permuted_indices = None
+        self.previous_event = None
 
-    # performing all-to-all dispatch on the input using deepEP
-    def _token_dispatch(
-        self,
-        x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-        topk_idx: torch.Tensor,
-        topk_weights: torch.Tensor,
-        num_experts: int,
-        device_mesh,
-        previous_event: Optional[EventOverlap] = None,
-    ) -> Tuple[
-        Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-        torch.Tensor,
-        torch.Tensor,
-        List,
-        Tuple,
-        EventOverlap,
-    ]:
+    def _token_dispatch(self, mod, inputs, device_mesh):
+        """
+        Dispatch tokens to experts using deep_ep's all-to-all.
+        
+        Args:
+            mod: The module being parallelized
+            inputs: Tuple of (x, num_tokens_per_expert, topk_idx, topk_weights)
+                    where x is original tokens (bs*slen, dim), NOT expanded
+            device_mesh: The device mesh for parallelism
+            
+        Returns:
+            Tuple of (dispatched_tokens, num_tokens_per_expert_group, topk_idx, topk_weights)
+        """
         if not _HAS_DEEP_EP:
             raise ImportError("deep_ep is required for DeepExpertParallel but is not installed.")
-        # NOTES: an optional `previous_event` means a CUDA event captured that you want to make it as a dependency
-        # of the dispatch kernel, it may be useful with communication-computation overlap. For more information, please
-        # refer to the docs of `Buffer.dispatch`
-        global _buffer
-
+        
+        from torchtitan.distributed.utils import get_buffer
+        
+        # Unpack inputs - x is original tokens (not expanded)
+        x, num_tokens_per_expert, topk_idx, topk_weights = inputs
+        
         ep_degree = device_mesh.shape[0]
-        num_tokens_per_expert = ...
         num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
+        num_experts = num_tokens_per_expert.shape[0]
+        
+        # Get or create the deep_ep buffer using the proper helper
+        # hidden_bytes is the size of one hidden vector (last dim), not total tensor size
+        hidden_bytes = x.shape[-1] * x.element_size()
+        buffer = get_buffer(hidden_bytes)
 
-        # Calculate layout before actual dispatch
+        # Calculate layout before actual dispatch using topk_idx (2D tensor: [num_tokens, top_k])
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
+            num_tokens_per_expert_layout,
             is_token_in_rank,
-            previous_event,
-        ) = _buffer.get_dispatch_layout(
+            event,
+        ) = buffer.get_dispatch_layout(
             topk_idx,
             num_experts,
-            previous_event=previous_event,
-            async_finish=True,
-            allocate_on_comm_stream=previous_event is not None,
+            previous_event=None,
+            async_finish=False,  # Wait for layout computation
+            allocate_on_comm_stream=False,
         )
-        # Do MoE dispatch
+        
+        # Do MoE dispatch - x is original tokens, DeepEP handles expansion
         # NOTES: the CPU will wait for GPU's signal to arrive, so this is not compatible with CUDA graph
-        # Unless you specify `num_worst_tokens`, but this flag is for intranode only
-        # For more advanced usages, please refer to the docs of the `dispatch` function
+        # DeepEP requires topk_weights to be float32
+        topk_weights_f32 = topk_weights.to(torch.float32) if topk_weights is not None else None
         (
             recv_x,
             recv_topk_idx,
@@ -155,40 +169,39 @@ class DeepExpertParallel(ParallelStyle):
             num_recv_tokens_per_expert_list,
             handle,
             event,
-        ) = _buffer.dispatch(
+        ) = buffer.dispatch(
             x,
             topk_idx=topk_idx,
-            topk_weights=topk_weights,
+            topk_weights=topk_weights_f32,
             num_tokens_per_rank=num_tokens_per_rank,
             num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
             is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=num_tokens_per_expert,
-            previous_event=previous_event,
-            async_finish=True,
-            allocate_on_comm_stream=True,
+            num_tokens_per_expert=num_tokens_per_expert_layout,
+            previous_event=None,
+            async_finish=False,  # Wait for dispatch to complete before using recv_x
+            allocate_on_comm_stream=False,
         )
+        
+        # Store handle and metadata for combine phase
+        self.handle = handle
+        self.previous_event = event
+        self.original_topk_idx = topk_idx  # Store original for scatter after combine
 
-        from torchtitan.models.moe.utils import _permute
+        # Convert list to tensor if needed (deep_ep returns a list)
+        # This tensor has shape [num_local_experts * ep_degree] - tokens from each rank for each local expert
+        if isinstance(num_recv_tokens_per_expert_list, list):
+            num_recv_tokens_per_expert_tensor = torch.tensor(
+                num_recv_tokens_per_expert_list, dtype=torch.int32, device=recv_x.device
+            )
+        else:
+            num_recv_tokens_per_expert_tensor = num_recv_tokens_per_expert_list
 
-        # NOTE: After this all-to-all, the routed input is put on proper EP rank.
-        # However, the num_tokens_per_expert_group is not of the final target format
-        # [#tokens for local expert 0, #tokens for local expert 1, ...]
-        # Rather, it is of the format
-        # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
-        #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
-        # We need to perform another shuffle to get the correct format
-        # TO-DO: Confirm that this is the case with deepep's all-to-all
+        # Store input shape for combine phase (no padding here - @expert_parallel will handle it)
+        self.input_shape = recv_x.shape
 
-        (
-            self.input_shape,
-            routed_input,
-            self.permuted_indices,
-            num_tokens_per_expert_group,
-        ) = _permute(
-            recv_x, num_recv_tokens_per_expert_list, ep_degree, num_local_experts
-        )
-
-        return routed_input, num_tokens_per_expert_group, handle
+        # Return format for experts.forward(): (x, num_tokens_per_expert, topk_idx, topk_weights)
+        # Don't do permutation here - @expert_parallel decorator will handle it
+        return recv_x, num_recv_tokens_per_expert_tensor, recv_topk_idx, recv_topk_weights
 
     @staticmethod
     def _partition_fn(name, mod, device_mesh):
@@ -197,25 +210,46 @@ class DeepExpertParallel(ParallelStyle):
             dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
             mod.register_parameter(name, dist_param)
 
-    def _token_combine(
-        x: torch.Tensor, handle: Tuple, previous_event: Optional[EventOverlap] = None
-    ) -> Tuple[torch.Tensor, EventOverlap]:
+    def _token_combine(self, mod, outputs, device_mesh):
+        """
+        Combine expert outputs back to original token order using deep_ep.
+        
+        Args:
+            mod: The module being parallelized
+            outputs: Tuple of (routed_output, topk_idx) from experts
+            device_mesh: The device mesh for parallelism
+            
+        Returns:
+            Tuple of (combined_output, topk_idx) for MoE to scatter
+        """
         if not _HAS_DEEP_EP:
             raise ImportError("deep_ep is required for DeepExpertParallel but is not installed.")
-        global _buffer
+        
+        # Unpack outputs from experts
+        routed_output, topk_idx = outputs
+        
+        # No unpermutation needed - @expert_parallel decorator handles its own permute/unpermute
+        
+        from torchtitan.distributed.utils import get_buffer
+        
+        # Get the buffer (same one used in dispatch)
+        # hidden_bytes is the size of one hidden vector (last dim), not total tensor size
+        hidden_bytes = routed_output.shape[-1] * routed_output.element_size()
+        buffer = get_buffer(hidden_bytes)
 
-        # Do MoE combine
-        # For more advanced usages, please refer to the docs of the `combine` function
-        routed_output, _, event = _buffer.combine(
-            x,
-            handle,
-            async_finish=True,
-            previous_event=previous_event,
-            allocate_on_comm_stream=previous_event is not None,
+        # Do MoE combine using the stored handle
+        combined_output, _, event = buffer.combine(
+            routed_output,
+            self.handle,
+            async_finish=False,  # Wait for combine to complete
+            previous_event=None,
+            allocate_on_comm_stream=False,
         )
+        
+        self.previous_event = None
 
-        # For event management, please refer to the docs of the `EventOverlap` class
-        return routed_output, event
+        # Return combined output with the original topk_idx for scatter
+        return combined_output, self.original_topk_idx
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(

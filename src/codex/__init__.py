@@ -17,15 +17,13 @@ from torchtitan.models.deepseek_v3.infra.parallelize import (
 )
 from torchtitan.models.moe import MoEArgs
 
-# from .infra.parallelize import parallelize_codex
-# from .infra.pipeline import pipeline_codex
+from .infra.parallelize import parallelize_codex  # fallback without deep_ep
 from .model.args import CodexModelArgs
 from .model.model import Codex
 
 
 __all__ = [
-    # "parallelize_codex",
-    # "pipeline_codex",
+    "parallelize_codex",
     "CodexModelArgs",
     "Codex",
     "codex_configs",
@@ -35,14 +33,14 @@ __all__ = [
 codex_configs = {
     "small": CodexModelArgs(
         vocab_size=512,
-        d_model=1024,
+        d_model=2048,
         n_layers=12,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
-            num_experts=64,
-            num_shared_experts=0,
-            top_k=8,
+            num_experts=32,
+            num_shared_experts=1,
+            top_k=2,
             score_func="softmax",
             route_norm=False,
             score_before_experts=False,
@@ -56,8 +54,8 @@ codex_configs = {
         g=1,
         use_gelu=True,
         use_rope=False,
-        use_mla=False,
-        use_gemm=False,
+        use_mla=True,
+        use_gemm=True,
         use_for_loop=False,
     ),
 }
@@ -68,7 +66,7 @@ register_train_spec(
         name="codex",
         model_cls=Codex,
         model_args=codex_configs,
-        parallelize_fn=parallelize_deepseekv3,
+        parallelize_fn=parallelize_deepseekv3,  # Uses deep_ep for expert parallelism
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,
         build_lr_schedulers_fn=build_lr_schedulers,
