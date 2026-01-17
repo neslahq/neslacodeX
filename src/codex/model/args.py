@@ -89,6 +89,8 @@ class CodexModelArgs(BaseModelArgs):
 
     # MoE
     use_moe: bool = False
+    use_gemm: bool = False
+    use_for_loop: bool = False
     moe_args: MoEArgs = field(default_factory=MoEArgs)
     n_expert_groups: int = 1
     n_limited_groups: int = 1

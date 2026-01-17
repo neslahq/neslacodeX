@@ -40,12 +40,13 @@ codex_configs = {
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
-            num_experts=2,
-            num_shared_experts=1,
-            top_k=1,
+            num_experts=4,
+            num_shared_experts=0,
+            top_k=2,
             score_func="softmax",
             route_norm=False,
             score_before_experts=False,
+            use_grouped_mm=True,
         ),
         mscale=0.70,
         use_mup=False,
@@ -55,6 +56,8 @@ codex_configs = {
         use_gelu=True,
         use_rope=False,
         use_mla=False,
+        use_gemm=False,
+        use_for_loop=False,
     ),
 }
 

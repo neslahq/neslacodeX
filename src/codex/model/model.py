@@ -10,7 +10,7 @@ import math
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchtune.modules import RotaryPositionalEmbeddings
-from torchtitan.models.moe import GroupedExperts, FeedForward, MoEArgs
+from torchtitan.models.moe import GroupedExperts, FeedForward, MoEArgs, MoE
 from torchtitan.models.attention import build_attention
 from .args import CodexModelArgs
 
@@ -506,9 +506,7 @@ class CodexGroupedExperts(GroupedExperts):
 
 
 class CodexFeedForward(FeedForward):
-    def __init__(
-        self, dim, hidden_dim, ffn_scale: float = 1.0, model_args = None
-    ):
+    def __init__(self, dim, hidden_dim, ffn_scale: float = 1.0, model_args=None):
         super().__init__(dim, hidden_dim)
         self.ffn_scale = float(ffn_scale)
 
@@ -633,7 +631,7 @@ class Gate(nn.Module):
         return weights.type_as(x), topk_indices, num_tokens_per_expert
 
 
-class MoE(nn.Module):
+class CodexMoE(nn.Module):
     def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int, model_args):
         super().__init__()
 
@@ -789,12 +787,27 @@ class TransformerBlock(nn.Module):
         self.ln_2 = nn.RMSNorm(model_args.d_model)
         self.moe_enabled = use_moe
         if use_moe:
-            self.moe = MoE(
-                model_args.moe_args,
-                model_args.d_model,
-                model_args.moe_inter_dim,
-                model_args,
-            )
+            if model_args.use_gemm:
+                self.moe = MoE(
+                    model_args.moe_args,
+                    dim=model_args.d_model,
+                    hidden_dim=model_args.moe_inter_dim,
+                )
+            elif model_args.use_for_loop:
+                model_args.moe_args.use_grouped_mm = False
+                self.moe = CodexMoE(
+                    model_args.moe_args,
+                    dim=model_args.d_model,
+                    hidden_dim=model_args.moe_inter_dim,
+                    model_args=model_args,
+                )
+            else:
+                self.moe = CodexMoE(
+                    model_args.moe_args,
+                    model_args.d_model,
+                    model_args.moe_inter_dim,
+                    model_args,
+                )
         else:
             if model_args.use_gelu:
                 self.mlp = MLP(model_args)
@@ -920,7 +933,7 @@ class Codex(nn.Module):
         #     )
         # elif self.model_args.use_mup:
         #     self.output_scale = self.model_args.init_std * self.model_args.mup_multiplier**-0.5
-        # else: 
+        # else:
         #     self.output_scale = self.model_args.init_std
         nn.init.normal_(self.output.weight, mean=0.0, std=self.model_args.init_std)
         # TODO: confirm if this is correct, also we are using tied weights

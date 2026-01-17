@@ -22,6 +22,7 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.expert_parallel import (
+    DeepExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
     ReordererSequenceParallel,
@@ -487,13 +488,13 @@ def apply_moe_ep_tp(
         elif tp_mesh is None:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
+            experts_plan = DeepExpertParallel()
         elif etp_enabled:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
         else:
             experts_mesh = ep_mesh
-            experts_plan = ExpertParallel()
+            experts_plan = DeepExpertParallel()
 
         parallelize_module(
             module=transformer_block.moe.experts,
