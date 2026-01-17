@@ -697,14 +697,15 @@ class CodexMoE(nn.Module):
         if self.shared_experts is not None:
             self.shared_experts.init_weights(residual_scale)
 
-        with torch.device(buffer_device):
-            self.tokens_per_expert = torch.zeros(
-                self.experts.num_experts, dtype=torch.float32
+        # Get the device from router weights if buffer_device is None
+        device = buffer_device if buffer_device is not None else self.router.w_gate.weight.device
+        self.tokens_per_expert = torch.zeros(
+            self.experts.num_experts, dtype=torch.float32, device=device
+        )
+        if self.load_balance_coeff is not None:
+            self.expert_bias = torch.zeros(
+                self.experts.num_experts, dtype=torch.float32, device=device
             )
-            if self.load_balance_coeff is not None:
-                self.expert_bias = torch.zeros(
-                    self.experts.num_experts, dtype=torch.float32
-                )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
