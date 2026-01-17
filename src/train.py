@@ -245,7 +245,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             raise ValueError(
                 "Either steps, target_flops, or target_param_data_ratio must be set"
             )
-        logger.info(f"Training steps: {self.steps} total batch size tokens: {self.total_batch_size_tokens} flops per batch: {self.flops_per_batch}")
+        logger.info(f"Training steps: {self.steps} total batch size tokens: {self.total_batch_size_tokens} flops per batch: {self.flops_per_batch} flops per token: {self.num_flops_per_token}")
 
         # register model hooks for activation logging here if enabled
         if self.job_config.training.log_activations:
@@ -330,7 +330,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             buffer_device = device_type
         else:
             init_device = device_type
-            buffer_device = None
+            buffer_device = device_type
 
         self.loss_fn = self.train_spec.build_loss_fn(job_config)
 

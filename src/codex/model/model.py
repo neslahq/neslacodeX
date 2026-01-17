@@ -10,7 +10,7 @@ import math
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchtune.modules import RotaryPositionalEmbeddings
-from torchtitan.models.moe import GroupedExperts, FeedForward, MoEArgs
+from torchtitan.models.moe import GroupedExperts, FeedForward, MoEArgs, MoE
 from torchtitan.models.attention import build_attention
 from .args import CodexModelArgs
 
@@ -323,8 +323,8 @@ class MultiHeadLatentAttention(nn.Module):
 
         self.model_args = model_args
 
-    def init_weights(self, init_std, mup_multiplier, residual_scale):
-        mup_scale = mup_multiplier**-0.5
+    def init_weights(self, residual_scale):
+        # mup_scale = mup_multiplier**-0.5
 
         # Handle wq (Dense or LoRA)
         if self.q_lora_rank == 0:
@@ -343,7 +343,7 @@ class MultiHeadLatentAttention(nn.Module):
 
         # wkv_b: Up projection (r -> d_out). Input is normalized. Scale by 1/sqrt(r)
         # scale_b = init_std * (self.kv_lora_rank**-0.5)
-        scale_b = init_std * mup_scale
+        # scale_b = init_std * mup_scale
         nn.init.normal_(self.wkv_b.weight, mean=0.0, std=self.wkv_b_scale)
         self.kv_norm.reset_parameters()
 
@@ -633,7 +633,7 @@ class Gate(nn.Module):
         return weights.type_as(x), topk_indices, num_tokens_per_expert
 
 
-class MoE(nn.Module):
+class CodexMoE(nn.Module):
     def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int, model_args):
         super().__init__()
 
@@ -791,9 +791,8 @@ class TransformerBlock(nn.Module):
         if use_moe:
             self.moe = MoE(
                 model_args.moe_args,
-                model_args.d_model,
-                model_args.moe_inter_dim,
-                model_args,
+                dim=model_args.d_model,
+                hidden_dim=model_args.moe_inter_dim,
             )
         else:
             if model_args.use_gelu:
@@ -803,6 +802,7 @@ class TransformerBlock(nn.Module):
                     model_args.d_model,
                     model_args.inter_dim,
                     ffn_scale=model_args.ffn_scale,
+                    model_args=model_args,
                 )
         # residual scaling from gpt 2
         self.residual_scale = (
@@ -816,7 +816,7 @@ class TransformerBlock(nn.Module):
         #     else 1.0
         # )
         # self.init_std = model_args.init_std
-        # # self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
+        self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
         self.model_args = model_args
@@ -828,7 +828,7 @@ class TransformerBlock(nn.Module):
             self.attn.init_weights(self.residual_scale)
 
         if self.moe_enabled:
-            self.moe.init_weights(self.residual_scale, buffer_device)
+            self.moe.init_weights(self.weight_init_std, buffer_device)
         else:
             self.mlp.init_weights(self.residual_scale, buffer_device)
 
