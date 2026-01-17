@@ -480,7 +480,7 @@ class MLP(nn.Module):
 
 
 class CodexGroupedExperts(GroupedExperts):
-    def __init__(self, dim, hidden_dim, num_experts, use_grouped_mm):
+    def __init__(self, dim, hidden_dim, num_experts, use_grouped_mm, model_args):
         super().__init__(dim, hidden_dim, num_experts, use_grouped_mm)
 
         if model_args.use_spectral_norm:
@@ -642,6 +642,7 @@ class CodexMoE(nn.Module):
             hidden_dim=hidden_dim,
             num_experts=num_experts,
             use_grouped_mm=moe_args.use_grouped_mm,
+            model_args=model_args,
         )
         self.router = Gate(
             dim=dim,

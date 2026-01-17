@@ -64,7 +64,7 @@ local_batch_size = 8
 seq_len = 4096
 max_norm = 0.0  # grad norm clipping
 steps = 0
-target_flops = 0.0
+target_flops = 6.2e16
 target_param_data_ratio = 0
 dataset = "dolma3_mix-6T_train"
 dataset_path = ""
@@ -76,7 +76,7 @@ data_parallel_shard_degree = -1
 tensor_parallel_degree = 1
 pipeline_parallel_degree = 1
 pipeline_parallel_microbatch_size = 1
-expert_parallel_degree = 1
+expert_parallel_degree = 8
 context_parallel_degree = 1
 order = ["dp_shard"]
 
@@ -102,7 +102,7 @@ precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output"]
 
 [validation]
-enable = true
+enable = false
 dataset = "dolma3_mix-6T_validation"
 freq = 50
 val_tokens = 52428800
