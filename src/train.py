@@ -177,6 +177,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if self.job_config.sweep.enable:
             sweep_config = self.metrics_processor.get_run_config()
             model_args.update_from_sweep_config(job_config, sweep_config)
+            # Apply sweep config to job_config for optimizer/training params
+            self._apply_sweep_to_job_config(sweep_config)
 
         # Ensure vocab_size matches the tokenizer to avoid out-of-range embedding indices
         if self.tokenizer is not None:
@@ -245,7 +247,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             raise ValueError(
                 "Either steps, target_flops, or target_param_data_ratio must be set"
             )
-        logger.info(f"Training steps: {self.steps} total batch size tokens: {self.total_batch_size_tokens} flops per batch: {self.flops_per_batch} flops per token: {self.num_flops_per_token}")
+        logger.info(
+            f"Training steps: {self.steps} total batch size tokens: {self.total_batch_size_tokens} flops per batch: {self.flops_per_batch} flops per token: {self.num_flops_per_token}"
+        )
 
         # register model hooks for activation logging here if enabled
         if self.job_config.training.log_activations:
@@ -263,7 +267,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             }
             self.register_model_hooks(model)
             # Setup CSV logging for activation means (rank 0 only)
-            run = "mup" if self.model_args.use_mup else "mup_sp" if self.model_args.use_spectral_norm else "sp"
+            run = (
+                "mup"
+                if self.model_args.use_mup
+                else "mup_sp" if self.model_args.use_spectral_norm else "sp"
+            )
             sweep_id = sweep_config.sweep_id if self.job_config.sweep.enable else ""
             run_id = sweep_config.run_id if self.job_config.sweep.enable else ""
 
@@ -283,8 +291,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
                 if self.job_config.sweep.enable
                 else (
-                    self.activation_log_dir
-                    / f"{run}_activations_baseline_spectral.csv"
+                    self.activation_log_dir / f"{run}_activations_baseline_spectral.csv"
                 )
             )
             if torch.distributed.get_rank() == 0:
@@ -514,6 +521,42 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"(warmup ratio {job_config.lr_scheduler.warmup_ratio})"
         )
 
+    def _apply_sweep_to_job_config(self, sweep_config) -> None:
+        """Apply sweep parameters to job_config for optimizer/training params.
+
+        Handles dot-notation params like 'optimizer.lr' or 'lr_scheduler.warmup_ratio'.
+        """
+        if sweep_config is None:
+            return
+
+        for param in self.job_config.sweep.params:
+            if not hasattr(sweep_config, param):
+                continue
+
+            value = getattr(sweep_config, param)
+
+            # Handle dot notation (e.g., "optimizer.lr")
+            if "." in param:
+                parts = param.split(".")
+                config_section = parts[0]
+                config_key = parts[1]
+
+                # Get the config section (e.g., job_config.optimizer)
+                if hasattr(self.job_config, config_section):
+                    section = getattr(self.job_config, config_section)
+                    if hasattr(section, config_key):
+                        setattr(section, config_key, value)
+                        logger.info(f"Sweep: Updated {param} to {value}")
+                    else:
+                        logger.warning(
+                            f"Sweep: Config key {config_key} not found in {config_section}"
+                        )
+                else:
+                    logger.warning(f"Sweep: Config section {config_section} not found")
+            else:
+                # Non-dotted param, check model_args (handled by update_from_sweep_config)
+                pass
+
     def register_model_hooks(self, model: torch.nn.Module):
         hooked_modules = ["attn", "mlp", "tok_embeddings", "output"]
 
@@ -531,9 +574,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 if layer_name == "tok_embeddings":
                     activation_cache["embedding"][step] = output.abs().mean().detach()
                 elif layer_name == "attn":
-                    activation_cache["attention"][step, layer_idx] = output.abs().mean().detach()
+                    activation_cache["attention"][step, layer_idx] = (
+                        output.abs().mean().detach()
+                    )
                 elif layer_name == "mlp":
-                    activation_cache["mlp"][step, layer_idx] = output.abs().mean().detach()
+                    activation_cache["mlp"][step, layer_idx] = (
+                        output.abs().mean().detach()
+                    )
                 elif layer_name == "output":
                     activation_cache["output"][step] = output.abs().mean().detach()
 
@@ -855,9 +902,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     logger.warning("Ran out of data; last step was canceled.")
                     break
 
-                self.checkpointer.save(
-                    self.step, last_step=(self.step == self.steps)
-                )
+                self.checkpointer.save(self.step, last_step=(self.step == self.steps))
 
                 # Run validation if validator is available
                 if (

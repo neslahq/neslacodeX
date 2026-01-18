@@ -1,0 +1,26 @@
+program: train.sh
+name: codex_optimizer_training_sweep
+method: bayes
+metric:
+  name: loss_metrics/global_avg_loss
+  goal: minimize
+parameters:
+  # Optimizer parameters
+  optimizer.lr:
+    min: 0.001
+    max: 0.5
+    distribution: log_uniform_values
+  optimizer.momentum:
+    min: 0.0
+    max: 1.0
+    distribution: uniform
+  # Training parameters
+  lr_scheduler.decay_ratio:
+    min: 0.6
+    max: 0.9
+    distribution: uniform
+command:
+  - ${env}
+  - bash
+  - ${program}
+
