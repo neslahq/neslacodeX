@@ -4,7 +4,7 @@
 
 set -ex
 
-NUM_RUNS=${NUM_RUNS:-50}
+NUM_RUNS=${NUM_RUNS:-100}
 CONFIG_FILE=${CONFIG_FILE:-"sweep_config/optimizer_training.yaml"}
 WANDB_PROJECT=${WANDB_PROJECT:-"neslacodex-hp-tuning"}
 WANDB_ENTITY=${WANDB_ENTITY:-"tinuade"}

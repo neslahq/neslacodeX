@@ -136,9 +136,10 @@ class CodexModelArgs(BaseModelArgs):
             head_dim = self.d_model // self.n_heads
 
         # Feedforward hidden sizes (standard Transformer: 4x d_model)
-        self.inter_dim = 4 * self.d_model
+        # self.inter_dim = 4 * self.d_model
+        self.inter_dim = 1024
         # self.moe_inter_dim = max(self.moe_inter_dim, head_dim)  # keep sane minimum
-        self.moe_inter_dim = 1024
+        self.moe_inter_dim = 256
 
         if self.use_mup:
             self.mup_multiplier = self.d_model / self.mup_base_dim

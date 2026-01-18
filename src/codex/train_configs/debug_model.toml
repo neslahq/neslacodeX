@@ -14,7 +14,7 @@ enable_wandb = true
 
 [model]
 name = "codex"
-flavor = "small"
+flavor = "tiny"
 hf_assets_path = ""
 converters = []
 tokenizer_name = "allenai/Olmo-3-1025-7B"
@@ -64,7 +64,7 @@ local_batch_size = 8
 seq_len = 4096
 max_norm = 0.0  # grad norm clipping
 steps = 0
-target_flops = 6.2e16
+target_flops = 8.2e15
 target_param_data_ratio = 0
 dataset = "dolma3_mix-6T_train"
 dataset_path = ""
@@ -111,7 +111,7 @@ seq_len = 4096
 steps = 0 # Recommend value for c4_validation with world-size=8 and seq_len=8192
 
 [sweep]
-enable = false
+enable = true
 max_width = 1024
 eps = 1e-8
 params = ["optimizer.lr", "optimizer.weight_decay", "optimizer.momentum", "lr_scheduler.warmup_ratio", "lr_scheduler.decay_ratio"]

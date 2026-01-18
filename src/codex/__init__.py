@@ -33,6 +33,30 @@ __all__ = [
 
 
 codex_configs = {
+    "tiny": CodexModelArgs(
+        vocab_size=512,
+        d_model=768,
+        n_layers=6,
+        n_dense_layers=1,
+        n_heads=16,
+        moe_args=MoEArgs(
+            num_experts=32,
+            num_shared_experts=1,
+            top_k=1,
+            score_func="softmax",
+            route_norm=False,
+            score_before_experts=False,
+        ),
+        mscale=0.70,
+        use_moe=True,
+        use_mup=False,
+        use_spectral_norm=False,
+        use_residual_scaling=True,
+        g=4,
+        use_gelu=False,
+        use_rope=True,
+        use_mla=True,
+    ),
     "small": CodexModelArgs(
         vocab_size=512,
         d_model=2048,
