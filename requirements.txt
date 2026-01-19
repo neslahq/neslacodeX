@@ -36,3 +36,4 @@ flash-linear-attention
 matplotlib
 torchao
 pandas
+zstandard

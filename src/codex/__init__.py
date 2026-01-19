@@ -56,6 +56,7 @@ codex_configs = {
         use_gelu=False,
         use_rope=True,
         use_mla=True,
+        use_aspect_ratio=True,
     ),
     "small": CodexModelArgs(
         vocab_size=512,

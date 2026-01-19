@@ -179,6 +179,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model_args.update_from_sweep_config(job_config, sweep_config)
             # Apply sweep config to job_config for optimizer/training params
             self._apply_sweep_to_job_config(sweep_config)
+            self._log_sweep_parameters(sweep_config)
 
         # Ensure vocab_size matches the tokenizer to avoid out-of-range embedding indices
         if self.tokenizer is not None:
@@ -556,6 +557,50 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             else:
                 # Non-dotted param, check model_args (handled by update_from_sweep_config)
                 pass
+
+    def _log_sweep_parameters(self, sweep_config) -> None:
+        """Log sweep parameter values via the metrics processor for W&B/TB tracking."""
+        if sweep_config is None:
+            logger.warning("Sweep enabled but no sweep config was provided to log.")
+            return
+
+        sweep_metrics: dict[str, Any] = {}
+
+        for param in self.job_config.sweep.params:
+            value = self._resolve_sweep_value(sweep_config, param)
+            if value is None:
+                continue
+            key = f"sweep_params/{param.replace('.', '_')}"
+            sweep_metrics[key] = (
+                value if isinstance(value, (int, float, bool, str)) else str(value)
+            )
+
+        for meta_key in ("sweep_id", "run_id"):
+            if hasattr(sweep_config, meta_key):
+                sweep_metrics[f"sweep_metadata/{meta_key}"] = getattr(
+                    sweep_config, meta_key
+                )
+
+        if not sweep_metrics:
+            return
+
+        try:
+            # Use step 0 to capture sweep metadata before training begins.
+            self.metrics_processor.sweep_log(sweep_metrics, step=0)
+        except Exception as exc:
+            logger.warning(f"Failed to log sweep parameters: {exc}")
+
+    def _resolve_sweep_value(self, sweep_config, param: str) -> Any | None:
+        """Resolve a sweep parameter value from the run config or job config."""
+        if hasattr(sweep_config, param):
+            return getattr(sweep_config, param)
+
+        current: Any = self.job_config
+        for part in param.split("."):
+            if not hasattr(current, part):
+                return None
+            current = getattr(current, part)
+        return current
 
     def register_model_hooks(self, model: torch.nn.Module):
         hooked_modules = ["attn", "mlp", "tok_embeddings", "output"]

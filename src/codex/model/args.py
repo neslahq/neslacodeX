@@ -128,18 +128,20 @@ class CodexModelArgs(BaseModelArgs):
         if self.use_aspect_ratio:
             self.d_model = self.n_layers * self.aspect_ratio
             self.n_heads = self.find_num_heads(self.d_model, self.v_head_dim)
+            self.moe_inter_dim = self.n_layers * self.aspect_ratio // 2
         else:
             # Ensure attention head dimension is valid
             assert (
                 self.d_model % self.n_heads == 0
             ), f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})"
             head_dim = self.d_model // self.n_heads
+            self.moe_inter_dim = 256
 
         # Feedforward hidden sizes (standard Transformer: 4x d_model)
         # self.inter_dim = 4 * self.d_model
         self.inter_dim = 1024
         # self.moe_inter_dim = max(self.moe_inter_dim, head_dim)  # keep sane minimum
-        self.moe_inter_dim = 256
+        
 
         if self.use_mup:
             self.mup_multiplier = self.d_model / self.mup_base_dim
@@ -233,6 +235,20 @@ class CodexModelArgs(BaseModelArgs):
             self.d_model // self.n_heads,
             seq_len,
         )
+
+        # Interpret as: in every 4 layers, 3 are DeltaNet, 1 is MLA
+        delta_ratio = 3.0 / 4.0
+        mla_ratio = 1.0 / 4.0
+
+        mla_nonproj_flops_per_token = 12 * l * h * q * t
+        delta_nonproj_flops_per_token = 20 * l * h * (q ** 2)
+
+        # Weighted non-projection attention flops/token for hybrid architecture:
+        nonproj_attn_flops_per_token = (
+            mla_ratio * mla_nonproj_flops_per_token
+            + delta_ratio * delta_nonproj_flops_per_token
+        )
+
         # Reasoning behind the factor of 12 for the self-attention part of the formula:
         # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
         # 2. the flash attention does 1 more matmul recomputation in the backward
@@ -241,7 +257,7 @@ class CodexModelArgs(BaseModelArgs):
         # 4. we follow the convention and do not account for sparsity in causal attention
         num_flops_per_token = (
             6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
-            + 12 * l * h * q * t
+            + nonproj_attn_flops_per_token
         )
 
         return nparams, num_flops_per_token

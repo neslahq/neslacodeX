@@ -34,7 +34,7 @@ is_light = false
 norm_factor = "spectral"
 zeropower_backend = "newtonschulz5"
 backend_steps = 5
-momentum = 0.1
+momentum = 0.5
 nesterov = false
 
 [[optimizer.extra_param_group_split_rules]]
@@ -55,7 +55,7 @@ norm_factor = "spectral"
 
 [lr_scheduler]
 warmup_ratio = 0.0  # lr scheduler warm up, normally 20% of the train steps
-decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
+decay_ratio = 0.7  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "linear"
 min_lr_factor = 0.0
 
@@ -114,5 +114,5 @@ steps = 0 # Recommend value for c4_validation with world-size=8 and seq_len=8192
 enable = true
 max_width = 1024
 eps = 1e-8
-params = ["optimizer.lr", "optimizer.weight_decay", "optimizer.momentum", "lr_scheduler.warmup_ratio", "lr_scheduler.decay_ratio"]
+params = ["optimizer.lr", "optimizer.momentum"]
 
