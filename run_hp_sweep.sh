@@ -1,27 +1,37 @@
 #!/usr/bin/env bash
-# Hyperparameter sweep launcher for Codex model using W&B agent
-# Usage: WANDB_PROJECT=codex WANDB_ENTITY=nesla-lab ./run_hp_sweep.sh
+# Hyperparameter sweep launcher for Codex model - LR grid search per FLOP budget
+# Usage: ./run_hp_sweep.sh
 
 set -ex
 
+# FLOP budgets and corresponding depths (1:1 mapping)
+FLOPS_BUDGETS=(1e16 3e16 6e16)
 DEPTHS=(12 16 20)
+
+# Learning rates: 2^-5.5, 2^-5, 2^-4.5, 2^-4, 2^-3.5, 2^-3  
+LR_VALUES=(0.022097087 0.03125 0.044194174 0.0625 0.088388348 0.125)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
+
+TRAIN_SCRIPT="${ROOT_DIR}/train.sh"
+DEFAULT_CONFIG_FILE="${ROOT_DIR}/src/codex/train_configs/debug_model.toml"
+BASE_CONFIG_FILE="${CONFIG_FILE:-${DEFAULT_CONFIG_FILE}}"
+CUSTOM_IMPORT="src.scripts.override_model_config"
 
 RESULTS_DIR="${ROOT_DIR}/hp_tuning_results"
 mkdir -p "$RESULTS_DIR"
 RESULTS_FILE="$RESULTS_DIR/results.csv"
 
-NUM_RUNS=${NUM_RUNS:-30}
-CONFIG_FILE=${CONFIG_FILE:-"sweep_config/optimizer_training.yaml"}
-WANDB_PROJECT=${WANDB_PROJECT:-"neslacodex-scion-hp-transfer"}
+WANDB_PROJECT=${WANDB_PROJECT:-"neslacodex-scion-hp-scaling"}
 WANDB_ENTITY=${WANDB_ENTITY:-"tinuade"}
+WANDB_RUN="${WANDB_RUN:-hp_sweep}"
 
+EXTRA_ARGS=("$@")
 
 # Write CSV header only if file doesn't exist
 if [ ! -f "$RESULTS_FILE" ]; then
-    echo "depth,model_dim,num_params,lr,val_loss" > "$RESULTS_FILE"
+    echo "flops_budget,depth,model_dim,num_params,lr,val_loss" > "$RESULTS_FILE"
 fi
 
 log() {
@@ -30,88 +40,88 @@ log() {
 
 # Check if a run already exists in results
 run_exists() {
-    local depth=$1
-    grep -q "^${depth}," "$RESULTS_FILE" 2>/dev/null
+    local flops=$1
+    local depth=$2
+    local lr=$3
+    grep -q "^${flops},${depth},[^,]*,[^,]*,${lr}," "$RESULTS_FILE" 2>/dev/null
 }
 
-for d in "${DEPTHS[@]}"; do
-    if run_exists "$d"; then
-        log "Skipping d=$d (already in results)"
-        continue
-    fi
+# Create a temporary config file with updated LR values (including extra_param_group_split_rules)
+create_lr_config() {
+    local lr=$1
+    local temp_config="$RESULTS_DIR/temp_config_lr${lr}.toml"
+    
+    # Use Python to update LR in both optimizer.lr and extra_param_group_split_rules
+    python3 << EOF
+import re
 
-    log "Training d=$d..."
+with open("${BASE_CONFIG_FILE}", "r") as f:
+    content = f.read()
 
-    echo "============================================================"
-    echo "Starting W&B Hyperparameter Sweep"
-    echo "Depth: ${d}"
-    echo "Config: ${CONFIG_FILE}"
-    echo "Project: ${WANDB_PROJECT}"
-    echo "Entity: ${WANDB_ENTITY}"
-    echo "Max runs: ${NUM_RUNS}"
-    echo "============================================================"
+# Update optimizer.lr
+content = re.sub(r'^(lr\s*=\s*)[\d.eE+-]+', r'\g<1>${lr}', content, flags=re.MULTILINE)
 
-    # Create the sweep and extract the sweep ID
-    SWEEP_ID=$(
-      wandb sweep --project "${WANDB_PROJECT}" --entity "${WANDB_ENTITY}" "${CONFIG_FILE}" 2>&1 \
-      | awk '/Run sweep agent with: wandb agent/ {print $NF}'
-    )
+with open("${temp_config}", "w") as f:
+    f.write(content)
+EOF
 
-    if [ -z "${SWEEP_ID}" ]; then
-      echo "ERROR: Failed to create sweep. Check your W&B credentials and config."
-      exit 1
-    fi
+    echo "$temp_config"
+}
 
-    echo "Created sweep: ${SWEEP_ID}"
-    echo "============================================================"
-    echo "Starting W&B agent with ${NUM_RUNS} runs..."
-    echo "============================================================"
+# Main loop: iterate over flops budgets
+for i in "${!FLOPS_BUDGETS[@]}"; do
+    flops="${FLOPS_BUDGETS[$i]}"
+    d="${DEPTHS[$i]}"
+    MODEL_DIM=$((d * 64))
 
-    # Launch the agent
-    wandb agent "${SWEEP_ID}" --count "${NUM_RUNS}"
+    log "=============================================="
+    log "Compute budget: $flops FLOPs, Depth: $d, Model dim: $MODEL_DIM"
+    log "=============================================="
 
-    if [ "$TRAIN_EXIT_CODE" -ne 0 ]; then
+    # Iterate over learning rates
+    for lr in "${LR_VALUES[@]}"; do
+        # Skip if already completed
+        if run_exists "$flops" "$d" "$lr"; then
+            log "Skipping flops=$flops, d=$d, lr=$lr (already in results)"
+            continue
+        fi
+
+        log "Training flops=$flops, d=$d, lr=$lr..."
+
+        # Create temporary config with updated LR values
+        TEMP_CONFIG=$(create_lr_config "$lr")
+        log "Using config: $TEMP_CONFIG"
+
+        # Unique tag for this run
+        TAG="hp_${flops}_d${d}_lr${lr}"
+        LOG_FILE="$RESULTS_DIR/${TAG}_train.log"
+
+        # Run training, capture exit code (don't exit script on failure)
+        set +e
+        CODEX_DEPTH="${d}" \
+        WANDB_RUN_NAME="${WANDB_RUN}_${TAG}" \
+        CONFIG_FILE="${TEMP_CONFIG}" \
+        "${TRAIN_SCRIPT}" \
+            --training.target_flops=$flops \
+            --experimental.custom_import "${CUSTOM_IMPORT}" \
+            "${EXTRA_ARGS[@]}" \
+            2>&1 | tee "$LOG_FILE"
+        TRAIN_EXIT_CODE=${PIPESTATUS[0]}
+        set -e
+
+        if [ "$TRAIN_EXIT_CODE" -ne 0 ]; then
             log "WARNING: Training exited with code $TRAIN_EXIT_CODE, attempting to extract partial results..."
         fi
 
-        # Extract training stats from the log (with fallbacks for missing values)
-        LOG_FILE="$RESULTS_DIR/${TAG}_train.log"
-        # Use sed to extract the number after the specific label
-        NUM_SCALING_PARAMS=$(grep "Number of parameters:" "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/.*Number of parameters: //' | grep -oP '^\d+' || echo "0")
-        # # Try to get scaling params, fall back to total params if not available
-        # NUM_SCALING_PARAMS=$(grep "Number of parameters:" "$LOG_FILE" 2>/dev/null | tail -1 | grep -oP 'scaling \d+' | grep -oP '\d+' || echo "")
-        # if [ -z "$NUM_SCALING_PARAMS" ]; then
-        #     NUM_SCALING_PARAMS="$NUM_PARAMS"
-        # fi
-        # NUM_ITERS=$(grep "Calculated number of iterations:" "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/.*Calculated number of iterations: //' | grep -oP '^\d+' || echo "0")
-        # Calculate tokens trained
-        # TOKENS_TRAINED=$(grep "Number of training tokens:" "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/.*Number of training tokens: //' | grep -oP '^\d+' || echo "0")
-        # Param:data ratio (using scaling params per Kaplan et al.)
-        # if [ "$NUM_SCALING_PARAMS" != "0" ] && [ "$TOKENS_TRAINED" != "0" ]; then
-        #     PARAM_DATA_RATIO=$(python3 -c "print(f'{$TOKENS_TRAINED / $NUM_SCALING_PARAMS:.2f}')")
-        # else
-        #     PARAM_DATA_RATIO="N/A"
-        # fi
-        # Model dim
-        MODEL_DIM=$((d * 64))
-        # Val BPB from final eval
+        # Extract training stats from the log
+        NUM_PARAMS=$(grep "Number of parameters:" "$LOG_FILE" 2>/dev/null | tail -1 | sed 's/.*Number of parameters: //' | grep -oP '^\d+' || echo "0")
         VAL_LOSS=$(grep "Final validation loss:" "$LOG_FILE" 2>/dev/null | tail -1 | grep -oP '[\d.]+$' || echo "N/A")
-        LR=$(grep "optimizer.lr" "$LOG_FILE" 2>/dev/null | tail -1 | grep -oP '[\d.]+$' || echo "N/A")
-        # Extract CORE score from training log (evaluated on final step)
-        # CORE_SCORE=$(grep "CORE metric:" "$LOG_FILE" | tail -1 | awk '{print $NF}')
-        # if [ -z "$CORE_SCORE" ]; then
-        #     log "WARNING: Could not extract CORE score for d=$d"
-        #     CORE_SCORE="0.0"
-        # fi
 
         # Handle empty values
-        # NUM_PARAMS="${NUM_PARAMS:-0}"
-        NUM_SCALING_PARAMS="${NUM_SCALING_PARAMS:-0}"
-        # NUM_ITERS="${NUM_ITERS:-0}"
-        # TOKENS_TRAINED="${TOKENS_TRAINED:-0}"
+        NUM_PARAMS="${NUM_PARAMS:-0}"
         VAL_LOSS="${VAL_LOSS:-N/A}"
-        LR="${LR:-N/A}"
-        log "  Scaling Params: $NUM_SCALING_PARAMS, LR: $LR, Val Loss: $VAL_LOSS"
+
+        log "  Params: $NUM_PARAMS, LR: $lr, Val Loss: $VAL_LOSS"
 
         if [ "$TRAIN_EXIT_CODE" -ne 0 ] && [ "$VAL_LOSS" = "N/A" ]; then
             log "WARNING: Training failed and no validation loss found, skipping CSV entry"
@@ -119,6 +129,17 @@ for d in "${DEPTHS[@]}"; do
         fi
 
         # Append to CSV
-        echo "$d,$MODEL_DIM,$NUM_SCALING_PARAMS,$LR,$VAL_LOSS" >> "$RESULTS_FILE"
-
+        echo "$flops,$d,$MODEL_DIM,$NUM_PARAMS,$lr,$VAL_LOSS" >> "$RESULTS_FILE"
+    done
 done
+
+# Cleanup temporary config files
+rm -f "$RESULTS_DIR"/temp_config_lr*.toml
+
+log "=============================================="
+log "HP Sweep Complete"
+log "=============================================="
+log "Results saved to: $RESULTS_FILE"
+echo ""
+echo "Results:"
+column -t -s',' "$RESULTS_FILE"

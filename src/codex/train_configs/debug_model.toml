@@ -29,7 +29,7 @@ implementation = "fused"
 early_step_in_backward = false
 lr = 0.1
 eps = 1e-20
-weight_decay = 0.0
+weight_decay = 0.1
 is_light = false
 norm_factor = "spectral"
 zeropower_backend = "newtonschulz5"
@@ -102,16 +102,16 @@ precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output"]
 
 [validation]
-enable = false
+enable = true
 dataset = "dolma3_mix-6T_validation"
 freq = 50
-val_tokens = 52428800
+val_tokens = 1638400
 local_batch_size = 8
 seq_len = 4096
 steps = 0 # Recommend value for c4_validation with world-size=8 and seq_len=8192
 
 [sweep]
-enable = true
+enable = false
 max_width = 1024
 eps = 1e-8
 params = ["optimizer.lr", "optimizer.momentum"]

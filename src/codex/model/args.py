@@ -128,37 +128,20 @@ class CodexModelArgs(BaseModelArgs):
         if self.use_aspect_ratio:
             self.d_model = self.n_layers * self.aspect_ratio
             self.n_heads = self.find_num_heads(self.d_model, self.v_head_dim)
-            self.moe_inter_dim = self.n_layers * self.aspect_ratio // 2
         else:
             # Ensure attention head dimension is valid
             assert (
                 self.d_model % self.n_heads == 0
             ), f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})"
             head_dim = self.d_model // self.n_heads
-            self.moe_inter_dim = 256
 
         # Feedforward hidden sizes (standard Transformer: 4x d_model)
-        # self.inter_dim = 4 * self.d_model
-        self.inter_dim = 1024
-        # self.moe_inter_dim = max(self.moe_inter_dim, head_dim)  # keep sane minimum
-        
+        self.inter_dim = 4 * self.d_model
+        # self.inter_dim = 1024
+        self.moe_inter_dim = self.d_model  # granularity=2d_model/dexpert=2
 
         if self.use_mup:
             self.mup_multiplier = self.d_model / self.mup_base_dim
-
-        # MLA/value head dim equals per-head model dim
-        # self.v_head_dim = head_dim
-
-        # # Split query/key head dim into non-rotary and rotary parts
-        # # Choose an even split; ensure sum equals head_dim
-        # qk_nope = max(1, head_dim // 2)
-        # qk_rope = max(1, head_dim - qk_nope)
-        # self.qk_nope_head_dim = qk_nope
-        # self.qk_rope_head_dim = qk_rope
-
-        # # Rank for KV low-rank path: tie to head_dim but cap to d_model
-        # # Keep a reasonable floor for small models
-        # self.kv_lora_rank = min(self.d_model, max(128, head_dim))
 
     def __post_init__(self):
         # Initialize dynamic fields based on current d_model and n_heads
@@ -185,16 +168,16 @@ class CodexModelArgs(BaseModelArgs):
                 "CP support for FlexAttention is still in progress."
             )
 
-    def update_from_sweep_config(self, job_config: JobConfig, sweep_config) -> None:
-        if sweep_config is not None:
-            for param in job_config.sweep.params:
-                if hasattr(sweep_config, param):
-                    setattr(self, param, getattr(sweep_config, param))
-                    logger.info(f"Updated {param} to {getattr(self, param)}")
-                else:
-                    logger.warning(f"Parameter {param} not found in sweep config")
-        else:
-            logger.warning("No sweep config found")
+    # def update_from_sweep_config(self, job_config: JobConfig, sweep_config) -> None:
+    #     if sweep_config is not None:
+    #         for param in job_config.sweep.params:
+    #             if hasattr(sweep_config, param):
+    #                 setattr(self, param, getattr(sweep_config, param))
+    #                 logger.info(f"Updated {param} to {getattr(self, param)}")
+    #             else:
+    #                 logger.warning(f"Parameter {param} not found in sweep config")
+    #     else:
+    #         logger.warning("No sweep config found")
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         nparams_embedding = 0
@@ -240,8 +223,10 @@ class CodexModelArgs(BaseModelArgs):
         delta_ratio = 3.0 / 4.0
         mla_ratio = 1.0 / 4.0
 
-        mla_nonproj_flops_per_token = 12 * l * h * q * t
-        delta_nonproj_flops_per_token = 20 * l * h * (q ** 2)
+        mla_nonproj_flops_per_token = (
+            12 * l * h * q * t
+        )  # ignoring latent and rope flops
+        delta_nonproj_flops_per_token = 20 * l * h * (q**2)
 
         # Weighted non-projection attention flops/token for hybrid architecture:
         nonproj_attn_flops_per_token = (

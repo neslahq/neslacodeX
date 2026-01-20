@@ -176,7 +176,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # set model args from sweep config
         if self.job_config.sweep.enable:
             sweep_config = self.metrics_processor.get_run_config()
-            model_args.update_from_sweep_config(job_config, sweep_config)
+            # model_args.update_from_sweep_config(job_config, sweep_config)
             # Apply sweep config to job_config for optimizer/training params
             self._apply_sweep_to_job_config(sweep_config)
             self._log_sweep_parameters(sweep_config)
@@ -547,6 +547,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     section = getattr(self.job_config, config_section)
                     if hasattr(section, config_key):
                         setattr(section, config_key, value)
+                        if config_key == "lr":
+                            # If the "lr" is present in optimizer.extra_param_group_split_rules, update there too
+                            if (
+                                hasattr(
+                                    self.job_config.optimizer,
+                                    "extra_param_group_split_rules",
+                                )
+                                and self.job_config.optimizer.extra_param_group_split_rules
+                                is not None
+                            ):
+                                for (
+                                    rule
+                                ) in (
+                                    self.job_config.optimizer.extra_param_group_split_rules
+                                ):
+                                    if "lr" in rule:
+                                        rule["lr"] = value
                         logger.info(f"Sweep: Updated {param} to {value}")
                     else:
                         logger.warning(

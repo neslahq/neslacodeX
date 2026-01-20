@@ -22,9 +22,7 @@ DEPTHS=(10)
 # DEPTHS=(10 12 14 16 18 20)
 WANDB_RUN="${WANDB_RUN:-scaling}"
 
-# export OMP_NUM_THREADS=1
-# export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat}"
-# source .venv/bin/activate
+export OMP_NUM_THREADS=1
 
 RESULTS_DIR="${ROOT_DIR}/scaling_laws_results"
 mkdir -p "$RESULTS_DIR"
