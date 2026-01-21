@@ -5,11 +5,11 @@
 set -ex
 
 # FLOP budgets and corresponding depths (1:1 mapping)
-FLOPS_BUDGETS=(1e16 3e16 6e16)
-DEPTHS=(12 16 20)
+FLOPS_BUDGETS=(6e15 8e15 10e15)
+DEPTHS=(10 12 14)
 
-# Learning rates: 2^-5.5, 2^-5, 2^-4.5, 2^-4, 2^-3.5, 2^-3  
-LR_VALUES=(0.022097087 0.03125 0.044194174 0.0625 0.088388348 0.125)
+# Learning rates: 2^-5.5, 2^-5, 2^-4.5, 2^-4, 2^-3.5, 2^-3, 2^-2.5, 2^-2  
+LR_VALUES=(0.022097087 0.03125 0.044194174 0.0625 0.088388348 0.125 0.176776696 0.25)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
@@ -19,7 +19,7 @@ DEFAULT_CONFIG_FILE="${ROOT_DIR}/src/codex/train_configs/debug_model.toml"
 BASE_CONFIG_FILE="${CONFIG_FILE:-${DEFAULT_CONFIG_FILE}}"
 CUSTOM_IMPORT="src.scripts.override_model_config"
 
-RESULTS_DIR="${ROOT_DIR}/hp_tuning_results"
+RESULTS_DIR="${ROOT_DIR}/hp_scaling_results"
 mkdir -p "$RESULTS_DIR"
 RESULTS_FILE="$RESULTS_DIR/results.csv"
 

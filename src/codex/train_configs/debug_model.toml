@@ -29,12 +29,12 @@ implementation = "fused"
 early_step_in_backward = false
 lr = 0.1
 eps = 1e-20
-weight_decay = 0.1
+weight_decay = 0.0
 is_light = false
 norm_factor = "spectral"
 zeropower_backend = "newtonschulz5"
 backend_steps = 5
-momentum = 0.5
+momentum = 0.1
 nesterov = false
 
 [[optimizer.extra_param_group_split_rules]]
@@ -55,16 +55,17 @@ norm_factor = "spectral"
 
 [lr_scheduler]
 warmup_ratio = 0.0  # lr scheduler warm up, normally 20% of the train steps
-decay_ratio = 0.7  # lr scheduler decay ratio, 80% of the train steps
+decay_ratio = 0.0  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "linear"
 min_lr_factor = 0.0
 
 [training]
-local_batch_size = 8
+dtype = "bfloat16"
+local_batch_size = 12
 seq_len = 4096
 max_norm = 0.0  # grad norm clipping
 steps = 0
-target_flops = 8.2e15
+target_flops = 15e15
 target_param_data_ratio = 0
 dataset = "dolma3_mix-6T_train"
 dataset_path = ""
@@ -106,7 +107,7 @@ enable = true
 dataset = "dolma3_mix-6T_validation"
 freq = 50
 val_tokens = 1638400
-local_batch_size = 8
+local_batch_size = 12
 seq_len = 4096
 steps = 0 # Recommend value for c4_validation with world-size=8 and seq_len=8192
 

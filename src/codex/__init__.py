@@ -36,7 +36,7 @@ codex_configs = {
     "tiny": CodexModelArgs(
         vocab_size=512,
         d_model=768,
-        n_layers=6,
+        n_layers=10,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(

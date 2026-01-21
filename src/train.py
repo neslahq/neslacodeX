@@ -32,7 +32,7 @@ from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
-from torchtitan.config import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.attention import init_attention_mask
 from torchtitan.protocols.model_converter import build_model_converters
@@ -220,7 +220,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.step = 0
         self.ntokens_seen = 0
 
-        with torch.device("meta"):
+        with (
+            torch.device("meta"),
+            utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
+        ):
             model = self.train_spec.model_cls(model_args)
 
         # set training steps
@@ -239,11 +242,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.steps = job_config.training.steps
         elif job_config.training.target_flops > 0:
             self.steps = round(job_config.training.target_flops / self.flops_per_batch)
+            job_config.training.steps = self.steps
         elif job_config.training.target_param_data_ratio:
             target_training_tokens = (
                 job_config.training.target_param_data_ratio * self.num_params
             )
             self.steps = target_training_tokens // self.total_batch_size_tokens
+            job_config.training.steps = self.steps
         else:
             raise ValueError(
                 "Either steps, target_flops, or target_param_data_ratio must be set"
