@@ -14,17 +14,19 @@ EXTRA_ARGS=("$@")
 CUSTOM_IMPORT="src.scripts.override_model_config"
 
 FLOPS_BUDGETS=(
+    6e15
+    8e15
+    10e15
     1e16
-    # 3e18
     # 6e18
 )
-DEPTHS=(10)
+DEPTHS=(10 12 14 16)
 # DEPTHS=(10 12 14 16 18 20)
 WANDB_RUN="${WANDB_RUN:-scaling}"
 
 export OMP_NUM_THREADS=1
 
-RESULTS_DIR="${ROOT_DIR}/scaling_laws_results"
+RESULTS_DIR="${ROOT_DIR}/scaling_laws_results_v2"
 mkdir -p "$RESULTS_DIR"
 RESULTS_FILE="$RESULTS_DIR/results.csv"
 

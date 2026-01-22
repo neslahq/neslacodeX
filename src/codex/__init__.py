@@ -36,7 +36,7 @@ codex_configs = {
     "tiny": CodexModelArgs(
         vocab_size=512,
         d_model=768,
-        n_layers=10,
+        n_layers=8,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
@@ -52,11 +52,11 @@ codex_configs = {
         use_mup=False,
         use_spectral_norm=False,
         use_residual_scaling=True,
-        g=4,
+        g=3,
         use_gelu=False,
         use_rope=True,
         use_mla=True,
-        use_aspect_ratio=True,
+        use_aspect_ratio=False,
     ),
     "small": CodexModelArgs(
         vocab_size=512,

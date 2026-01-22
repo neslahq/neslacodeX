@@ -40,8 +40,7 @@ dist/*
 data
 out
 wandb
-scaling_laws_results/
-*_results/
+
 
 torchtitan/torchtitan/datasets/**/*.model
 
@@ -54,6 +53,10 @@ torchtitan/torchtitan/experiments/flux/assets/*
 *.log
 error.json
 _remote_module_non_scriptable.py
+
+# hp sweep outputs
+hp_*_results*/**/*_train.log
+hp_*_results*/**/temp_config_lr*.toml
 
 # Editor temporaries (VIM)
 [._]*.s[a-v][a-z]

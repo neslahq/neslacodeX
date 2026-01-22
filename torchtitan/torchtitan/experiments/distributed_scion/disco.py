@@ -260,12 +260,20 @@ class Disco(AbstractDiSCO):
 
                 # 1) scalar branch identical to step()
                 if p.numel() == 1:
-                    assert (
-                        group["backend"] == "identity"
-                    ), "scale params must use identity backend"
-                    assert (
-                        group["norm_factor"] == "sign"
-                    ), "scale params must use sign norm factor"
+                    # assert (
+                    #     group["backend"] == "identity"
+                    # ), "scale params must use identity backend"
+                    # assert (
+                    #     group["norm_factor"] == "sign"
+                    # ), "scale params must use sign norm factor"
+                    if group["backend"] != "identity" or group["norm_factor"] != "sign":
+                        logger.warning(
+                            "Scale param %s is in a group with backend=%s norm_factor=%s; "
+                            "DiSCO will update it with identity/sign semantics.",
+                            p_name,
+                            group.get("backend"),
+                            group.get("norm_factor"),
+                        )
                     self.scale_params.append(p)
                     self.scale_param_names.append(p_name)
                     continue
